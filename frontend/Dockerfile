@@ -5,7 +5,7 @@
 # container. That keeps the browser off a second origin entirely: no CORS
 # preflight, no hard-coded localhost:8000 baked into the bundle, and the JWT
 # never travels cross-origin.
-FROM node:22-alpine AS build
+FROM node:26-alpine AS build
 
 WORKDIR /app
 
