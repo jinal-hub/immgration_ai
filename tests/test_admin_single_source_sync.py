@@ -109,6 +109,27 @@ def _wait_for_run_terminal(client, headers, run_id, timeout=5.0):
 
 
 class TestSingleSourceSync:
+    def test_source_response_exposes_persisted_fetch_diagnostics(
+        self, client, admin_headers, engine, seeded_source,
+    ):
+        with get_session_factory(engine)() as session:
+            source = session.get(GovernmentSource, seeded_source)
+            source.fetch_status = "ACCESS_BLOCKED"
+            source.http_status = 403
+            source.last_error = "Playwright request was refused"
+            source.last_error_type = "http_error"
+            session.commit()
+
+        response = client.get(
+            f"/api/v1/admin/sources/{seeded_source}", headers=admin_headers,
+        )
+
+        assert response.status_code == 200
+        assert response.json()["fetch_status"] == "ACCESS_BLOCKED"
+        assert response.json()["http_status"] == 403
+        assert response.json()["last_error"] == "Playwright request was refused"
+        assert response.json()["last_error_type"] == "http_error"
+
     def test_admin_can_start_a_single_source_sync(self, client, admin_headers, seeded_source, monkeypatch):
         # Per the project's hard testing safety rules, automated tests never
         # make a real network call - stub sync_source itself (the single
@@ -133,7 +154,16 @@ class TestSingleSourceSync:
         # zero changes needed there.
         final = _wait_for_run_terminal(client, admin_headers, body["run_id"])
         assert final["status"] == "COMPLETED"
-        assert final["result"] == {"source_id": seeded_source, "status": "unchanged"}
+        assert final["result"] == {
+            "source_id": seeded_source,
+            "status": "unchanged",
+            "errors": [],
+            "fetch_status": None,
+            "http_status": None,
+            "last_error": None,
+            "last_error_type": None,
+            "last_checked_at": None,
+        }
 
     def test_non_admin_gets_403(self, client, non_admin_headers, seeded_source):
         resp = client.post(

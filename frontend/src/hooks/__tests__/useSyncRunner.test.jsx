@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { renderHook, act } from "@testing-library/react";
+import { renderHook, act, screen } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 import { ToastProvider } from "../../components/ToastContext.jsx";
 import { useSyncRunner } from "../useSyncRunner.js";
@@ -83,10 +83,55 @@ describe("useSyncRunner", () => {
     await act(async () => {
       await vi.advanceTimersByTimeAsync(6000);
     });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(500);
+    });
 
     expect(onSettled).toHaveBeenCalledTimes(1);
     expect(result.current.running).toBe(false);
     expect(result.current.elapsedSeconds).toBe(0);
+  });
+
+  it("includes Playwright failure details and paused-source count in the run summary", async () => {
+    api.syncAllSources.mockResolvedValue({ run_id: "run-detail" });
+    api.getReviewQueue.mockResolvedValue({ count: 0 });
+    api.getRun.mockResolvedValue({
+      status: "COMPLETED",
+      result: {
+        changed: 1,
+        errors: 1,
+        cooldowns: 1,
+        total_sources: 3,
+        results: [
+          {
+            source_id: "SRC-FAILED",
+            status: "error",
+            errors: ["Playwright navigation timed out"],
+          },
+          {
+            source_id: "SRC-PAUSED",
+            status: "cooldown",
+            errors: ["Host example.gov.au was skipped until later."],
+          },
+        ],
+      },
+    });
+
+    const { result } = renderHook(() => useSyncRunner(), { wrapper });
+    await act(async () => {
+      await result.current.runAll();
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(3000);
+    });
+
+    expect(screen.getByRole("status")).toHaveTextContent(
+      /1 paused by host cooldown/
+    );
+    expect(screen.getByRole("status")).toHaveTextContent(
+      /SRC-FAILED: Playwright navigation timed out/
+    );
+    expect(screen.getByRole("status")).toHaveTextContent(/SRC-PAUSED:/);
   });
 
   it("shows conflict message on 409 with host_cooldown code", async () => {

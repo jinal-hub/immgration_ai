@@ -34,6 +34,7 @@ function source(overrides = {}) {
     fetch_status: null,
     http_status: null,
     last_error: null,
+    last_error_type: null,
     consecutive_failures: 0,
     created_at: null,
     blocked_until: null,
@@ -114,6 +115,33 @@ describe("Sources table shows a host's refusal cooldown", () => {
     expect(screen.getByRole("button", { name: "Run now" })).toBeEnabled();
     expect(screen.getByRole("button", { name: "Run now" }).getAttribute("title"))
       .toBeNull();
+  });
+
+  it("shows the fetch result, HTTP status, and browser error in the source list", async () => {
+    await renderWith([
+      source({
+        last_checked_at: "2026-10-10T03:00:00Z",
+        fetch_status: "ACCESS_BLOCKED",
+        http_status: 403,
+        last_error: "Playwright navigation was refused",
+        last_error_type: "http_error",
+      }),
+    ]);
+
+    expect(screen.getByText("Blocked")).toBeInTheDocument();
+    expect(screen.getByText("HTTP 403")).toBeInTheDocument();
+    expect(screen.getByText("Playwright navigation was refused")).toBeInTheDocument();
+    expect(screen.getByText(new Date("2026-10-10T03:00:00Z").toLocaleString()))
+      .toBeInTheDocument();
+  });
+
+  it("explains blank diagnostics when a never-fetched source is paused", async () => {
+    await renderWith([
+      source({ blocked_until: FUTURE }),
+    ]);
+
+    expect(screen.getByText("Not checked (host paused)")).toBeInTheDocument();
+    expect(screen.getByText("Skipped (host paused)")).toBeInTheDocument();
   });
 });
 

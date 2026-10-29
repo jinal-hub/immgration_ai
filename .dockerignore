@@ -15,6 +15,11 @@ logs/
 tests/
 frontend/
 data/
+!data/
+data/*
+!data/gold/
+data/gold/*
+!data/gold/requirements_gold.json
 extracted/
 raw/
 validation/

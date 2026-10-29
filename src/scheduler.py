@@ -152,6 +152,24 @@ def get_sync_job(run_id: str) -> dict[str, Any] | None:
         return dict(job) if job is not None else None
 
 
+def _source_fetch_snapshot(session, source_id: str) -> dict[str, Any]:
+    """Include the persisted fetch diagnostics with a background sync result."""
+    from db.models import GovernmentSource
+
+    source = session.get(GovernmentSource, source_id)
+    if source is None:
+        return {}
+    return {
+        "fetch_status": source.fetch_status,
+        "http_status": source.http_status,
+        "last_error": source.last_error,
+        "last_error_type": source.last_error_type,
+        "last_checked_at": (
+            source.last_checked_at.isoformat() if source.last_checked_at else None
+        ),
+    }
+
+
 def _run_sync_job(run_id: str, engine, trigger_type: str) -> None:
     """Background-thread body: run the sync, record progress, release the lock.
 
@@ -175,8 +193,15 @@ def _run_sync_job(run_id: str, engine, trigger_type: str) -> None:
                 "changed": sum(1 for r in results if r.status == "changed"),
                 "unchanged": sum(1 for r in results if r.status == "unchanged"),
                 "errors": sum(1 for r in results if r.status == "error"),
+                "cooldowns": sum(1 for r in results if r.status == "cooldown"),
                 "results": [
-                    {"source_id": r.source_id, "status": r.status} for r in results
+                    {
+                        "source_id": r.source_id,
+                        "status": r.status,
+                        "errors": getattr(r, "errors", []),
+                        **_source_fetch_snapshot(session, r.source_id),
+                    }
+                    for r in results
                 ],
             }
     except Exception as e:
@@ -235,7 +260,12 @@ def _run_single_source_sync_job(run_id: str, engine, source_id: str, trigger_typ
     try:
         with get_session(engine) as session:
             sync_result = sync_source(session, source_id, dry_run=False, trigger_type=trigger_type)
-            result = {"source_id": sync_result.source_id, "status": sync_result.status}
+            result = {
+                "source_id": sync_result.source_id,
+                "status": sync_result.status,
+                "errors": getattr(sync_result, "errors", []),
+                **_source_fetch_snapshot(session, source_id),
+            }
     except Exception as e:
         error = str(e)
     finally:

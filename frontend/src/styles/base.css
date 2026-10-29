@@ -203,6 +203,40 @@ p {
   gap: var(--space-2);
 }
 
+.gold-rule-list {
+  display: grid;
+  gap: var(--space-3);
+}
+
+.gold-rule-card {
+  min-width: 0;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius);
+  padding: var(--space-3);
+}
+
+.gold-rule-json {
+  max-width: 100%;
+  margin: 0;
+  padding: var(--space-3);
+  overflow: auto;
+  border-radius: var(--radius-sm);
+  background: var(--color-surface);
+  font-size: 12px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.synthetic-gold-item {
+  margin-top: var(--space-2);
+}
+
+.synthetic-gold-item summary {
+  cursor: pointer;
+  font-weight: 600;
+}
+
 .card-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
@@ -656,4 +690,3 @@ tbody tr:hover {
   color: var(--color-accent);
   border-bottom-color: var(--color-accent);
 }
-

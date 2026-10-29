@@ -6,7 +6,8 @@ All mutations require admin role. The human approval flow:
 from __future__ import annotations
 
 import json
-from typing import Any
+from pathlib import Path
+from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
@@ -32,6 +33,13 @@ router = APIRouter()
 # refused, so the confirmation cannot be fired by accident or by a script
 # that does not understand what it is confirming.
 NOT_EVALUABLE_CONFIRMATION = "ACTIVATE"
+SYNTHETIC_GOLD_FILE = (
+    Path(__file__).resolve().parents[3] / "data" / "gold" / "requirements_gold.json"
+)
+CURATED_GOLD_SOURCES = {
+    ("SRC-AU-189-MAIN", "DOC-GOLD-189-REAL"),
+    ("SRC-AU-190-MAIN", "DOC-GOLD-190-REAL"),
+}
 
 
 # ---------------------------------------------------------------------------
@@ -41,6 +49,11 @@ class RuleActionRequest(BaseModel):
     notes: str | None = None
     # Typed confirmation, required only when the rule's field is not
     # something an applicant can supply. See NOT_EVALUABLE_CONFIRMATION.
+    confirm_not_evaluable: str | None = None
+
+
+class GoldRuleReviewRequest(BaseModel):
+    decision: Literal["ACTIVATE", "REJECT"]
     confirm_not_evaluable: str | None = None
 
 
@@ -58,6 +71,11 @@ class RuleResponse(BaseModel):
     message: str | None = None
     status: str
     current_version: int = 1
+    source_id: str | None = None
+    document_id: str | None = None
+    document_version: int | None = None
+    chunk_id: int | None = None
+    requirement_version_id: int | None = None
     evidence_text: str | None = None
     # Where in the source the rule's evidence came from: "p. 12" for a PDF
     # page, the heading path for an HTML section, None when the rule has no
@@ -68,6 +86,16 @@ class RuleResponse(BaseModel):
     # it will always evaluate as UNKNOWN.
     evaluable: bool = True
     created_at: str | None = None
+    condition: Any = None
+    exception: Any = None
+
+
+class SyntheticGoldExamplesResponse(BaseModel):
+    dataset_file: str
+    program_id: str | None = None
+    synthetic: bool
+    warning: str
+    items: list[dict[str, Any]]
 
 
 class ReviewQueueResponse(BaseModel):
@@ -146,10 +174,17 @@ def _orm_to_response(obj: RuleORM, citation: str | None = None) -> RuleResponse:
         message=obj.message,
         status=obj.status,
         current_version=obj.current_version or 1,
+        source_id=obj.source_id,
+        document_id=obj.document_id,
+        document_version=obj.document_version,
+        chunk_id=obj.chunk_id,
+        requirement_version_id=obj.requirement_version_id,
         evidence_text=obj.evidence_text,
         citation=citation,
         evaluable=is_field_evaluable(obj.field),
         created_at=obj.created_at.isoformat() if obj.created_at else None,
+        condition=json.loads(obj.condition_json) if obj.condition_json else None,
+        exception=json.loads(obj.exception_json) if obj.exception_json else None,
     )
 
 
@@ -221,6 +256,24 @@ def list_rules(
 # NOTE: /batch/* routes MUST be registered before any /{rule_id}/* route.
 # Starlette matches in registration order, so a late /batch/validate would be
 # swallowed by POST /{rule_id}/validate with rule_id="batch". Do not reorder.
+
+@router.get("/gold-examples", response_model=SyntheticGoldExamplesResponse)
+def synthetic_gold_examples(
+    current_user: dict = Depends(require_admin),
+):
+    """Return synthetic examples for display only; they are never executable rules."""
+    data = json.loads(SYNTHETIC_GOLD_FILE.read_text(encoding="utf-8"))
+    return SyntheticGoldExamplesResponse(
+        dataset_file=SYNTHETIC_GOLD_FILE.name,
+        program_id=data.get("program_id"),
+        synthetic=True,
+        warning=(
+            "Synthetic test data, not verbatim government evidence. "
+            "Read-only; these examples cannot be activated."
+        ),
+        items=data.get("items", []),
+    )
+
 
 @router.post("/batch/validate", response_model=list[RuleResponse])
 def batch_validate(
@@ -447,6 +500,45 @@ def activate_rule(
         _require_evaluable_confirmation(existing.field, body.confirm_not_evaluable)
         try:
             obj = repo.activate_rule(rule_id, actor=actor)
+            return _orm_to_response(obj, _citation_for(session, obj))
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.post("/{rule_id}/review", response_model=RuleResponse)
+def review_gold_rule(
+    rule_id: str,
+    body: GoldRuleReviewRequest,
+    request: Request,
+    current_user: dict = Depends(require_admin),
+):
+    """Apply one explicit admin decision to a curated gold draft atomically."""
+    actor = _actor_from(current_user)
+    engine = get_db_engine(request)
+    with get_session(engine) as session:
+        repo = EnhancedRuleRepo(session)
+        obj = repo.get(rule_id)
+        if obj is None:
+            raise HTTPException(status_code=404, detail="Rule not found")
+        if (
+            not rule_id.startswith("RULE-GOLD-")
+            or (obj.source_id, obj.document_id) not in CURATED_GOLD_SOURCES
+        ):
+            raise HTTPException(status_code=400, detail="Only curated gold rules can use this action")
+        if obj.status != "DRAFT":
+            raise HTTPException(status_code=400, detail="Only DRAFT gold rules can be reviewed")
+
+        try:
+            if body.decision == "REJECT":
+                obj = repo.reject_rule(rule_id, actor=actor)
+                repo.save_version_snapshot(rule_id, "REJECTED", actor)
+            else:
+                _require_evaluable_confirmation(obj.field, body.confirm_not_evaluable)
+                repo.validate_rule(rule_id, actor=actor)
+                repo.save_version_snapshot(rule_id, "VALIDATED", actor)
+                repo.approve_rule(rule_id, actor=actor)
+                repo.save_version_snapshot(rule_id, "APPROVED", actor)
+                obj = repo.activate_rule(rule_id, actor=actor)
             return _orm_to_response(obj, _citation_for(session, obj))
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e))

@@ -1,8 +1,8 @@
 """Host cooldowns — stop hitting a host after it refuses us (Part B).
 
 A refusal is 403 or 429. It pauses *the host* for FETCH_COOLDOWN_HOURS
-(default 6); every source on that host is skipped until then, a single-source
-sync answers 409, and there is deliberately no override.
+(default 0.25 hours / 15 minutes); every source on that host is skipped until
+then, a single-source sync answers 409, and there is deliberately no override.
 
 The safety rule these tests also pin down: a refusal may only DELAY us. The
 next request we make is byte-for-byte the same request we would have made
@@ -119,8 +119,8 @@ def _ok(url="https://ok.example.invalid/page"):
 # Configuration
 # ===========================================================================
 class TestConfiguration:
-    def test_default_is_six_hours(self):
-        assert DEFAULT_COOLDOWN_HOURS == 6.0
+    def test_default_is_fifteen_minutes(self):
+        assert DEFAULT_COOLDOWN_HOURS == 0.25
 
     def test_env_override(self, monkeypatch):
         monkeypatch.setenv("FETCH_COOLDOWN_HOURS", "1.5")
@@ -155,7 +155,7 @@ class TestCooldownWindow:
         until = start_cooldown(session, REFUSING, 403,
                                source_id="SRC-AU-189", now=now)
         session.commit()
-        assert until == now + timedelta(hours=DEFAULT_COOLDOWN_HOURS)
+        assert until == now + timedelta(minutes=15)
         assert blocked_until(session, REFUSING, now) == until
 
     def test_it_is_a_host_pause_not_a_url_pause(self, session):
@@ -172,7 +172,7 @@ class TestCooldownWindow:
         now = datetime(2026, 10, 8, 12, 0, tzinfo=timezone.utc)
         start_cooldown(session, REFUSING, 403, now=now)
         session.commit()
-        after = now + timedelta(hours=DEFAULT_COOLDOWN_HOURS, seconds=1)
+        after = now + timedelta(minutes=15, seconds=1)
         assert blocked_until(session, REFUSING, after) is None
         assert is_cooling(session, REFUSING, after) is False
 
@@ -188,7 +188,7 @@ class TestCooldownWindow:
         assert row.hits == 2
         assert row.http_status == 429
         assert row.cooldown_until.replace(tzinfo=timezone.utc) == (
-            now + timedelta(minutes=5, hours=DEFAULT_COOLDOWN_HOURS)
+            now + timedelta(minutes=20)
         )
 
     def test_a_refusal_after_the_window_starts_fresh(self, session):
@@ -196,7 +196,7 @@ class TestCooldownWindow:
         now = datetime(2026, 10, 8, 12, 0, tzinfo=timezone.utc)
         start_cooldown(session, REFUSING, 403, now=now)
         session.commit()
-        later = now + timedelta(hours=DEFAULT_COOLDOWN_HOURS, minutes=1)
+        later = now + timedelta(minutes=16)
         start_cooldown(session, REFUSING, 403, now=later)
         session.commit()
 
@@ -435,7 +435,10 @@ class TestSyncBehaviour:
         results = sync_all_sources(session, trigger_type="MANUAL")
 
         assert fetched == ["SRC-AU-CALM"], "the paused host is never contacted"
-        assert len(results) == 1 and results[0].source_id == "SRC-AU-CALM"
+        by_source = {result.source_id: result for result in results}
+        assert by_source["SRC-AU-CALM"].status != "cooldown"
+        assert by_source["SRC-AU-REFUSING"].status == "cooldown"
+        assert "skipped until" in by_source["SRC-AU-REFUSING"].errors[0]
 
     def test_sync_all_contacts_every_source_when_nothing_is_cooling(
         self, session, monkeypatch,

@@ -23,8 +23,8 @@ from sqlalchemy import Text
 from sqlalchemy.types import TypeDecorator, UserDefinedType
 
 
-# The dimension of the stored embeddings. This is the width of
-# text-embedding-3-small, the model the embedding client uses by default.
+# The dimension of the stored embeddings. Cohere Embed v4 is configured to
+# return this width by default.
 # Changing it means a new column and a re-embed of every chunk, which is
 # why it is a constant rather than a setting.
 EMBEDDING_DIMENSIONS = 1536

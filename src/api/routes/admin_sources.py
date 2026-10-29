@@ -148,6 +148,7 @@ class SourceResponse(BaseModel):
     fetch_status: str | None = None
     http_status: int | None = None
     last_error: str | None = None
+    last_error_type: str | None = None
     consecutive_failures: int | None = None
     created_at: str | None = None
     # When the source's HOST will talk to us again after refusing a fetch
@@ -182,6 +183,7 @@ def _source_to_response(
         fetch_status=obj.fetch_status,
         http_status=obj.http_status,
         last_error=obj.last_error,
+        last_error_type=obj.last_error_type,
         consecutive_failures=obj.consecutive_failures,
         created_at=obj.created_at.isoformat() if obj.created_at else None,
         blocked_until=(

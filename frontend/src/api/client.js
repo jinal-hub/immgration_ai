@@ -178,6 +178,20 @@ export function listRules({ status, programId } = {}) {
   return request("/api/v1/admin/rules", { query: { status, program_id: programId } });
 }
 
+export function getSyntheticGoldExamples() {
+  return request("/api/v1/admin/rules/gold-examples");
+}
+
+export function reviewGoldRule(ruleId, decision, { confirmNotEvaluable } = {}) {
+  return request(`/api/v1/admin/rules/${encodeURIComponent(ruleId)}/review`, {
+    method: "POST",
+    body: {
+      decision,
+      ...(confirmNotEvaluable ? { confirm_not_evaluable: confirmNotEvaluable } : {}),
+    },
+  });
+}
+
 export function validateRule(ruleId) {
   return request(`/api/v1/admin/rules/${encodeURIComponent(ruleId)}/validate`, { method: "POST", body: {} });
 }
@@ -315,4 +329,3 @@ export function rejectDiscoveredSource(discoveredSourceId, reason) {
     { method: "POST", body: { reason } }
   );
 }
-

@@ -24,7 +24,7 @@ been exercised. No live government host or paid LLM is contacted by the test sui
 | Source registry | 14 verified sources across SKILLED_189/190/491, WORK_482, STUDENT_500, VISITOR_600 and the Migration Regulations; seeded idempotently from `sources/source_registry.seed.json` |
 | Fetch | One Playwright Chromium path, headless, honest `FETCH_USER_AGENT`, per-host spacing + jitter, `Crawl-delay`/`Retry-After`, refusal cooldown per host, optional static egress proxy. No User-Agent rotation, no IP rotation, no challenge solving |
 | Raw snapshots + versions | Immutable raw files on a Docker volume; SHA-256 content hashes; `INITIAL`/`CHANGED`/`UNCHANGED` classification; historical versions are never rewritten (append-only trigger) |
-| Extraction | OpenAI or Gemini, selected by `EXTRACTION_MODEL`; strict JSON schema; evidence must be an exact substring of the source chunk; dedup, cache, budget/rate governance; zero-chunk and schema failures are visible, not silent |
+| Extraction | Cohere Command A by default (`EXTRACTION_MODEL`); strict JSON schema; evidence must be an exact substring of the source chunk; dedup, cache, budget/rate governance; zero-chunk and schema failures are visible, not silent |
 | Requirement review | Admin queue with approve/reject/needs-review; reviewer is always the authenticated admin; full audit trail |
 | Rule compilation and review | Requirement -> rule bridge with a closed concept vocabulary; DRAFT -> VALIDATED -> APPROVED -> ACTIVE; transactional supersession; batch transitions; rules mentioning a field with no applicant counterpart are flagged "not evaluable" and need a typed confirmation to activate |
 | Dry run | `POST /admin/rules/evaluate` evaluates existing rules against a hypothetical profile without saving or activating anything; the UI exposes this as "Test rules" |
@@ -148,14 +148,14 @@ Copy `.env.example` and fill in only what you need. The most important values:
 | `PASSWORD_MIN_LENGTH` | 8 | API minimum; production refuses values below 8 |
 | `LOGIN_MAX_ATTEMPTS` / `LOGIN_LOCKOUT_SECONDS` | 5 / 900 | Per-email login throttle |
 | `SOURCE_ALLOWED_HOST_SUFFIXES` | `.gov.au` | Source host allowlist; never a bare wildcard |
-| `EXTRACTION_MODEL` | `gpt-4o-mini` | OpenAI (`gpt-*`) or Gemini (`gemini-*`) model |
-| `OPENAI_API_KEY`, `GEMINI_API_KEY` | unset | Required for live extraction |
+| `COHERE_API_KEY` | unset | Required for default Cohere extraction and real embeddings |
+| `EXTRACTION_MODEL` | `command-a-03-2025` | Cohere Command model used for requirement extraction |
 | `LLM_DAILY_BUDGET_USD` / `LLM_MONTHLY_BUDGET_USD` | 10 / 200 | Budget guard for extraction |
 | `EMBEDDINGS_ENABLED` | `false` | Turns semantic search on; no silent mock fallback |
-| `EMBEDDING_MODEL` | `text-embedding-3-small` | 1536 dimensions, matches pgvector column |
+| `EMBEDDING_MODEL` | `embed-v4.0` | Cohere Embed v4; 1536 dimensions, matches pgvector column |
 | `FETCH_USER_AGENT` | `AU-Immigration-Source-Monitor/0.1` | One honest UA per process |
 | `FETCH_MIN_INTERVAL_SECONDS` / `FETCH_JITTER_SECONDS` | 8 / 4 | Same-host spacing |
-| `FETCH_COOLDOWN_HOURS` | 6 | Pause a host after 403/429 |
+| `FETCH_COOLDOWN_HOURS` | 0.25 (15 minutes) | Pause a host after 403/429 |
 | `FETCH_PROXY_URL` | unset | One fixed egress proxy; malformed values fail closed |
 | `ENABLE_SCHEDULER` | `true` | Daily sync scheduler |
 | `GOVERNMENT_SYNC_HOUR_UTC` / `_MINUTE_UTC` | 3 / 0 | Daily schedule default (overridable in the DB/API) |
@@ -230,9 +230,15 @@ Keyword search always works. Semantic search needs `EMBEDDINGS_ENABLED=true`, an
 embedding model, pgvector, and embedded chunks:
 
 ```powershell
+# Set COHERE_API_KEY and EMBEDDINGS_ENABLED=true in the environment first.
 $env:PYTHONPATH = "src"
 .\.venv\Scripts\python.exe -m src.extraction.embeddings --backfill
 ```
+
+The existing extraction pipeline creates evidence-preserving text chunks; Cohere
+embeds those stored chunks and embeds search queries using the matching query mode.
+Embedding is opt-in because it makes paid API calls. After enabling embeddings,
+backfill existing chunks; new chunks can be backfilled the same way.
 
 A semantic request that cannot run returns 409 with the specific reason;
 `mode=auto` tries semantic, then keyword, and reports `mode` in the response so
@@ -368,7 +374,8 @@ Politeness is enforced in `src/fetch/politeness.py`:
 
 - Requests to the same host are spaced by `FETCH_MIN_INTERVAL_SECONDS` plus jitter.
 - `robots.txt` `Crawl-delay` and `Retry-After` are honoured.
-- A 403/429 pauses every source on that host for `FETCH_COOLDOWN_HOURS`; there is
+- A 403/429 pauses every source on that host for `FETCH_COOLDOWN_HOURS` (default
+  15 minutes); there is
   deliberately no override flag and no retry with a different identity.
 - `FETCH_PROXY_URL` is one fixed egress, never rotated, and fails closed.
 
@@ -392,14 +399,40 @@ and the `patchright` dependency are deleted. Nothing new imports it.
 
 ---
 
+## Curated gold rules
+
+The real-capture datasets for subclasses 189 and 190 are not automatic
+production seeds. To make their positive annotations reviewable in the admin
+console, run the importer against the configured database:
+
+```powershell
+python src/seed_gold_rules.py
+python src/seed_gold_rules.py --gold-file data/gold/skilled/skilled_190_real.json --chunks-file data/real_validation/skilled_190_real_chunks.json
+```
+
+The importer verifies every evidence quote against its captured chunk snapshot,
+stores that snapshot and its evidence lineage, skips negative examples, and
+creates rules only as `DRAFT` (with requirements in `NEEDS_REVIEW`). It is
+idempotent and never activates rules. The dashboard groups the imported rules
+by program, displays each rule as JSON, and offers explicit Activate/Reject
+decisions; activation records the existing validation and human-approval
+stages, and rules no applicant field can answer still require typing `ACTIVATE`.
+
+The Student, Visitor, and Work gold files currently contain no curated rules;
+the dashboard shows that state rather than inventing examples.
+`data/gold/requirements_gold.json` is synthetic test data, not verbatim
+government evidence. The dashboard displays its examples separately as
+read-only, and they cannot be activated.
+
 ## Known limitations
 
 - **Coverage is uneven.** `SRC-AU-CRICOS-REGISTER` is a search-only SPA and yields
   no listable content; it needs a different source (e.g. a bulk export). WORK,
   STUDENT and VISITOR gold sets are still empty placeholders - no fabricated
   evidence is used to fill them.
-- **Gemini schema adherence** failed on one source's chunks historically; that
-  failure is stored and visible on the extraction run, not hidden.
+- **Provider changes require validation.** Cohere extraction and embedding use
+  the same strict schema/evidence checks; provider failures remain visible on
+  the extraction run.
 - **Supersession with real government data** is proven by the e2e test but has not
   yet been exercised against a second real version of a real source.
 - **No applicant-facing UI.** The console is an internal admin tool.
@@ -432,7 +465,7 @@ automated and not run in CI.
    as blocked/paused and never retried with a different mechanism.
 4. **Review the SKILLED_189 rules**: dry-run them, then approve and activate.
    Rules flagged "not evaluable" need the typed confirmation.
-5. **Rotate secrets**: real `OPENAI_API_KEY`/`GEMINI_API_KEY`, `SECRET_KEY`,
+5. **Rotate secrets**: real `COHERE_API_KEY`, `SECRET_KEY`,
    `JWT_SECRET_KEY`, `POSTGRES_PASSWORD`, and a strong admin password. Keep
    `ALLOW_PUBLIC_REGISTRATION=false` unless public sign-up is intended.
 

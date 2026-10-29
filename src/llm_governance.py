@@ -306,6 +306,8 @@ class UsageLog:
 # Price config (USD per 1K tokens) — override via env or config
 # ---------------------------------------------------------------------------
 DEFAULT_PRICES = {
+    # Cohere Command A pricing, USD per 1K tokens.
+    "command-a-03-2025": {"input": 0.0025, "output": 0.01},
     "gpt-4o": {"input": 0.0025, "output": 0.01},
     "gpt-4o-mini": {"input": 0.00015, "output": 0.0006},
     "claude-sonnet-4-20250514": {"input": 0.003, "output": 0.015},

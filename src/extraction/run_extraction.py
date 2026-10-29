@@ -10,7 +10,7 @@ Usage:
     python src/extraction/run_extraction.py --review --reject REQ-SKILLED_189-abcd1234 --reviewer alice --notes "..."
 
 Without --model, resolves EXTRACTION_MODEL from the environment, falling back to
-gpt-4o-mini.  Missing OPENAI_API_KEY fails fast — there is no silent fallback to a mock
+command-a-03-2025. Missing COHERE_API_KEY fails fast for the default model — there is no silent fallback to a mock
 and fake requirement output is never manufactured.
 """
 from __future__ import annotations
@@ -26,7 +26,7 @@ sys.path.insert(0, str(SRC))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from db import ROOT, init_schema  # noqa: E402
-from llm_client import PROMPT_VERSION, DEFAULT_OPENAI_MODEL, get_client  # noqa: E402
+from llm_client import PROMPT_VERSION, DEFAULT_EXTRACTION_MODEL, get_client  # noqa: E402
 from llm_governance import get_shared_governance  # noqa: E402
 from requirement_extractor import extract_from_document  # noqa: E402
 from requirement_repository import complete_extraction_run, create_extraction_run, persist_requirement  # noqa: E402
@@ -163,7 +163,7 @@ def main() -> None:
     parser.add_argument("--document-id")
     parser.add_argument("--source-id")
     parser.add_argument("--model", default=None,
-                        help="OpenAI extraction model (default: EXTRACTION_MODEL or gpt-4o-mini).")
+                        help="Extraction model (default: EXTRACTION_MODEL or command-a-03-2025).")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--limit", type=int, default=None)
     parser.add_argument("--context-window", type=int, default=1)
@@ -198,17 +198,12 @@ def main() -> None:
     if not args.document_id and not args.source_id:
         parser.error("provide --document-id or --source-id (or --review)")
 
-    model = args.model or os.getenv("EXTRACTION_MODEL", DEFAULT_OPENAI_MODEL)
-    from llm_client import MockLLMClient, OpenAILLMClient
+    model = args.model or os.getenv("EXTRACTION_MODEL", DEFAULT_EXTRACTION_MODEL)
+    from llm_client import MockLLMClient
     if model == MockLLMClient.model_name:
         parser.error(
             "mock-llm-v1 is a test-only double and must not be used in production extraction. "
-            "Set EXTRACTION_MODEL to an OpenAI model (e.g. gpt-4o-mini) or pass --model."
-        )
-    if not OpenAILLMClient._is_openai_model(model):
-        parser.error(
-            f"Unsupported extraction model {model!r}. Only OpenAI models are supported "
-            "(examples: gpt-4o-mini, gpt-4o)."
+            "Set EXTRACTION_MODEL to a supported model (e.g. command-a-03-2025) or pass --model."
         )
 
     kwargs = dict(model=model, dry_run=args.dry_run, limit=args.limit,

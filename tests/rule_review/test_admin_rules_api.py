@@ -7,7 +7,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.pool import StaticPool
 from fastapi.testclient import TestClient
 
-from db.models import Base, Rule as RuleORM
+from db.models import Base, Rule as RuleORM, RuleVersion
 from db.connection import get_session_factory
 from api.main import app
 
@@ -65,7 +65,7 @@ def admin_headers(admin_token):
 
 
 def _create_rule(session, rule_id="R-1", status="DRAFT", program_id="SKILLED_189",
-                 category="AGE", field="age"):
+                 category="AGE", field="age", source_id=None, document_id=None):
     obj = RuleORM(
         rule_id=rule_id,
         requirement_id=f"REQ-{rule_id}",
@@ -81,6 +81,8 @@ def _create_rule(session, rule_id="R-1", status="DRAFT", program_id="SKILLED_189
         status=status,
         current_version=1,
         evidence_text="Applicants must be at least 25",
+        source_id=source_id,
+        document_id=document_id,
     )
     session.add(obj)
     session.commit()
@@ -228,6 +230,97 @@ class TestTransactionalActivation:
         # Check R-1 was superseded
         resp = client.get("/api/v1/admin/rules/R-1", headers=admin_headers)
         assert resp.json()["status"] == "SUPERSEDED"
+
+
+class TestGoldRuleReviewActions:
+    @staticmethod
+    def _create_gold_draft(session, field="age"):
+        return _create_rule(
+            session,
+            "RULE-GOLD-REAL-189-TEST",
+            field=field,
+            source_id="SRC-AU-189-MAIN",
+            document_id="DOC-GOLD-189-REAL",
+        )
+
+    def test_gold_activate_runs_lifecycle_and_records_admin(self, client, engine, admin_headers):
+        with get_session_factory(engine)() as s:
+            self._create_gold_draft(s)
+
+        response = client.post(
+            "/api/v1/admin/rules/RULE-GOLD-REAL-189-TEST/review",
+            json={"decision": "ACTIVATE"},
+            headers=admin_headers,
+        )
+
+        assert response.status_code == 200
+        assert response.json()["status"] == "ACTIVE"
+        with get_session_factory(engine)() as s:
+            snapshots = s.query(RuleVersion).filter_by(
+                rule_id="RULE-GOLD-REAL-189-TEST"
+            ).all()
+            assert {snapshot.change_type for snapshot in snapshots} == {
+                "VALIDATED", "APPROVED", "ACTIVATED",
+            }
+            assert {snapshot.created_by for snapshot in snapshots} == {"admin@test.com"}
+
+    def test_gold_activation_requires_confirmation_for_unevaluable_rule(
+        self, client, engine, admin_headers
+    ):
+        with get_session_factory(engine)() as s:
+            self._create_gold_draft(s, field="applicant.nominated_by_state_or_territory")
+
+        path = "/api/v1/admin/rules/RULE-GOLD-REAL-189-TEST/review"
+        refused = client.post(path, json={"decision": "ACTIVATE"}, headers=admin_headers)
+        assert refused.status_code == 400
+        with get_session_factory(engine)() as s:
+            assert s.get(RuleORM, "RULE-GOLD-REAL-189-TEST").status == "DRAFT"
+
+        accepted = client.post(
+            path,
+            json={"decision": "ACTIVATE", "confirm_not_evaluable": "ACTIVATE"},
+            headers=admin_headers,
+        )
+        assert accepted.status_code == 200
+        assert accepted.json()["status"] == "ACTIVE"
+        assert accepted.json()["evaluable"] is False
+
+    def test_gold_reject_action(self, client, engine, admin_headers):
+        with get_session_factory(engine)() as s:
+            self._create_gold_draft(s)
+
+        response = client.post(
+            "/api/v1/admin/rules/RULE-GOLD-REAL-189-TEST/review",
+            json={"decision": "REJECT"},
+            headers=admin_headers,
+        )
+
+        assert response.status_code == 200
+        assert response.json()["status"] == "REJECTED"
+
+    def test_review_action_rejects_non_gold_rules(self, client, engine, admin_headers):
+        with get_session_factory(engine)() as s:
+            _create_rule(s, "R-1", status="DRAFT")
+
+        response = client.post(
+            "/api/v1/admin/rules/R-1/review",
+            json={"decision": "ACTIVATE"},
+            headers=admin_headers,
+        )
+
+        assert response.status_code == 400
+
+    def test_synthetic_gold_examples_are_labeled_read_only(self, client, admin_headers):
+        response = client.get(
+            "/api/v1/admin/rules/gold-examples",
+            headers=admin_headers,
+        )
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["synthetic"] is True
+        assert "not verbatim government evidence" in data["warning"]
+        assert data["items"]
 
 
 class TestGetRule:

@@ -14,14 +14,14 @@ import pytest
 # developer's local .env can point it at a real (billed) provider model. Tests
 # must never make real LLM calls UNLESS the developer explicitly opts in.
 #
-#   Default (offline) mode:  EXTRACTION_MODEL is pinned to a fake OpenAI value
-#   and OPENAI_API_KEY is stripped, so the OpenAI-only factory fails fast if a
-#   test ever tries to reach a real provider — and the autouse fixture below
+#   Default (offline) mode:  EXTRACTION_MODEL is pinned to Cohere and provider
+#   keys are stripped, so a test fails fast if it tries to reach a real provider
+#   — and the autouse fixture below
 #   swaps in the deterministic MockLLMClient for every unit test.
 #
-#   Live mode:                set PYTEST_LLM_LIVE=1 and export OPENAI_API_KEY.
+#   Live mode:                set PYTEST_LLM_LIVE=1 and export a provider key.
 #   Integration tests marked ``integration`` (e.g. TestOpenAIRealLLM) then run
-#   against the real gpt-4o-mini and are skipped when the key is absent.
+#   against the configured live model and are skipped when the key is absent.
 #
 # These lines run at module load (before any app module is imported), so a local
 # .env's EXTRACTION_MODEL / provider keys can never leak in accidentally.
@@ -29,10 +29,13 @@ import pytest
 os.environ.setdefault("TESTING", "true")
 _LIVE = os.environ.get("PYTEST_LLM_LIVE") == "1"
 if _LIVE:
-    os.environ.setdefault("EXTRACTION_MODEL", "gpt-4o-mini")
+    os.environ.setdefault("EXTRACTION_MODEL", "command-a-03-2025")
 else:
-    os.environ["EXTRACTION_MODEL"] = "gpt-4o-mini"
-    for _key in ("OPENAI_API_KEY", "GEMINI_API_KEY", "GOOGLE_API_KEY", "ANTHROPIC_API_KEY"):
+    os.environ["EXTRACTION_MODEL"] = "command-a-03-2025"
+    for _key in (
+        "COHERE_API_KEY", "OPENAI_API_KEY", "GEMINI_API_KEY",
+        "GOOGLE_API_KEY", "ANTHROPIC_API_KEY",
+    ):
         os.environ.pop(_key, None)
 
 
@@ -70,10 +73,10 @@ def _set_testing_env():
 
 
 # ---------------------------------------------------------------------------
-# Unit tests must never hit a real LLM: swap the OpenAI-only factory out for
+# Unit tests must never hit a real LLM: swap the provider factory out for
 # the deterministic MockLLMClient wherever production code calls get_client.
 # Explicitly marked ``integration`` tests skip this swap so they can call the
-# real OpenAI API (when PYTEST_LLM_LIVE=1 and OPENAI_API_KEY is exported).
+# real provider API (when PYTEST_LLM_LIVE=1 and the provider key is exported).
 # ---------------------------------------------------------------------------
 @pytest.fixture(autouse=True)
 def _isolate_raw_snapshots(tmp_path, monkeypatch):

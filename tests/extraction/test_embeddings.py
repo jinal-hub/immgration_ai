@@ -22,9 +22,9 @@ from db.vector import EMBEDDING_DIMENSIONS  # noqa: E402
 from extraction.embeddings import (  # noqa: E402
     DEFAULT_EMBEDDING_MODEL,
     MOCK_EMBEDDING_MODEL,
+    CohereEmbeddingClient,
     EmbeddingError,
     MockEmbeddingClient,
-    OpenAIEmbeddingClient,
     cosine_similarity,
     embedding_model,
     embeddings_enabled,
@@ -36,7 +36,7 @@ from extraction.embeddings import (  # noqa: E402
 def _clean_env(monkeypatch):
     monkeypatch.delenv("EMBEDDINGS_ENABLED", raising=False)
     monkeypatch.delenv("EMBEDDING_MODEL", raising=False)
-    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("COHERE_API_KEY", raising=False)
 
 
 class TestTheOffSwitch:
@@ -108,9 +108,14 @@ class TestTheMock:
 
 
 class TestTheRealClient:
+    def test_factory_uses_cohere_when_enabled(self, monkeypatch):
+        monkeypatch.setenv("EMBEDDINGS_ENABLED", "true")
+        monkeypatch.setenv("COHERE_API_KEY", "test-key")
+        assert isinstance(get_embedding_client(), CohereEmbeddingClient)
+
     def test_a_missing_api_key_fails_loudly(self, monkeypatch):
         monkeypatch.setenv("EMBEDDINGS_ENABLED", "true")
-        with pytest.raises(EmbeddingError, match="OPENAI_API_KEY"):
+        with pytest.raises(EmbeddingError, match="COHERE_API_KEY"):
             get_embedding_client()
 
     def test_it_never_falls_back_to_the_mock(self, monkeypatch):
@@ -119,19 +124,40 @@ class TestTheRealClient:
             get_embedding_client()
 
     def test_an_unsupported_model_is_refused(self, monkeypatch):
-        monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+        monkeypatch.setenv("COHERE_API_KEY", "test-key")
         with pytest.raises(EmbeddingError, match="Unsupported embedding model"):
-            OpenAIEmbeddingClient(model="gpt-4o-mini")
-
-    def test_a_model_of_the_wrong_width_is_refused(self, monkeypatch):
-        monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
-        with pytest.raises(EmbeddingError, match="3072"):
-            OpenAIEmbeddingClient(model="text-embedding-3-large")
+            CohereEmbeddingClient(model="command-a-03-2025")
 
     def test_the_default_model_fits_the_column(self):
-        assert DEFAULT_EMBEDDING_MODEL == "text-embedding-3-small"
-        client = OpenAIEmbeddingClient(api_key="sk-test")
+        assert DEFAULT_EMBEDDING_MODEL == "embed-v4.0"
+        client = CohereEmbeddingClient(api_key="test-key")
         assert client.model_name == DEFAULT_EMBEDDING_MODEL
+
+    def test_document_and_query_embeddings_use_cohere_input_types(self, monkeypatch):
+        import requests
+
+        calls = []
+
+        class FakeResponse:
+            status_code = 200
+            text = ""
+
+            def json(self):
+                return {"embeddings": {"float": [[0.1] * EMBEDDING_DIMENSIONS]}}
+
+        def fake_post(*args, **kwargs):
+            calls.append(kwargs)
+            return FakeResponse()
+
+        monkeypatch.setattr(requests, "post", fake_post)
+        client = CohereEmbeddingClient(api_key="test-key")
+        client.embed(["document chunk"])
+        client.embed_query("search query")
+
+        assert calls[0]["json"]["input_type"] == "search_document"
+        assert calls[1]["json"]["input_type"] == "search_query"
+        assert calls[0]["json"]["output_dimension"] == EMBEDDING_DIMENSIONS
+        assert calls[0]["headers"]["Authorization"] == "Bearer test-key"
 
 
 class TestTheModelSetting:

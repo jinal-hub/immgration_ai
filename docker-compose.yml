@@ -52,9 +52,11 @@ services:
       CORS_ORIGINS: http://localhost:3000,http://localhost:5173
       ENABLE_SCHEDULER: "true"
       GOVERNMENT_SYNC_HOUR_UTC: "3"
-      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
-      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
-      EXTRACTION_MODEL: ${EXTRACTION_MODEL:-gpt-4o-mini}
+      FETCH_COOLDOWN_HOURS: ${FETCH_COOLDOWN_HOURS:-0.25}
+      COHERE_API_KEY: ${COHERE_API_KEY:-}
+      EXTRACTION_MODEL: ${EXTRACTION_MODEL:-command-a-03-2025}
+      EMBEDDINGS_ENABLED: ${EMBEDDINGS_ENABLED:-false}
+      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-embed-v4.0}
       # Off unless the operator explicitly opts in, matching the code default.
       ALLOW_PUBLIC_REGISTRATION: ${ALLOW_PUBLIC_REGISTRATION:-false}
     depends_on:

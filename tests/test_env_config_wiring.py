@@ -1,8 +1,8 @@
 """Tests for environment-driven LLM configuration wiring.
 
 Covers:
-* EXTRACTION_MODEL selects the requirement-extraction model (default stays
-  gpt-4o-mini); the factory supports OpenAI and Gemini models and rejects the
+* EXTRACTION_MODEL selects the requirement-extraction model (default is Cohere);
+  the factory supports Cohere, OpenAI and Gemini models and rejects the
   test-only mock-llm-v1 and any other unsupported provider model.
   OpenAILLMClient itself only accepts OpenAI model names (OPENAI_API_KEY required).
 * LLM_DAILY_BUDGET_USD / LLM_MONTHLY_BUDGET_USD are read into the discovery
@@ -32,9 +32,9 @@ from extraction.llm_client import OpenAILLMClient  # noqa: E402
 # EXTRACTION_MODEL wiring
 # ---------------------------------------------------------------------------
 class TestExtractionModelEnv:
-    def test_defaults_to_openai_when_unset(self, monkeypatch):
+    def test_defaults_to_cohere_when_unset(self, monkeypatch):
         monkeypatch.delenv("EXTRACTION_MODEL", raising=False)
-        assert _extraction_model() == "gpt-4o-mini"
+        assert _extraction_model() == "command-a-03-2025"
 
     def test_reads_env_when_set(self, monkeypatch):
         monkeypatch.setenv("EXTRACTION_MODEL", "gpt-4o")
@@ -80,6 +80,57 @@ class TestExtractionModelEnv:
         assert isinstance(client, GeminiLLMClient)
         # Governance is wired the same way as OpenAILLMClient (budget/rate-limit/cache).
         assert client.governance is not None
+
+    def test_default_routes_to_cohere_client(self, monkeypatch):
+        from extraction.llm_client import (
+            CohereLLMClient,
+            DEFAULT_EXTRACTION_MODEL,
+            create_llm_client,
+        )
+        monkeypatch.delenv("EXTRACTION_MODEL", raising=False)
+        monkeypatch.setenv("COHERE_API_KEY", "dummy-cohere-key")
+        client = create_llm_client()
+        assert DEFAULT_EXTRACTION_MODEL == "command-a-03-2025"
+        assert isinstance(client, CohereLLMClient)
+        assert client.governance is not None
+
+    def test_cohere_missing_api_key_fails_fast(self, monkeypatch):
+        from extraction.llm_client import CohereLLMClient
+        monkeypatch.delenv("COHERE_API_KEY", raising=False)
+        with pytest.raises(RuntimeError, match="COHERE_API_KEY"):
+            CohereLLMClient(api_key=None, model="command-a-03-2025")
+
+    def test_cohere_response_is_decoded_without_network(self, monkeypatch):
+        import requests
+        from extraction.llm_client import CohereLLMClient
+
+        class FakeResponse:
+            status_code = 200
+            headers = {}
+
+            def raise_for_status(self):
+                pass
+
+            def json(self):
+                return {
+                    "message": {"content": [{"type": "text", "text": '{"requirements": []}'}]},
+                    "usage": {"tokens": {"input_tokens": 12, "output_tokens": 4}},
+                }
+
+        calls = []
+
+        def fake_post(*args, **kwargs):
+            calls.append(kwargs)
+            return FakeResponse()
+
+        monkeypatch.setattr(requests, "post", fake_post)
+        client = CohereLLMClient(api_key="test-key", model="command-a-03-2025")
+        content, tokens_in, tokens_out, retries = client._call_cohere({"source": "fixture"})
+
+        assert content == '{"requirements": []}'
+        assert (tokens_in, tokens_out, retries) == (12, 4, 0)
+        assert calls[0]["json"]["response_format"] == {"type": "json_object"}
+        assert calls[0]["headers"]["Authorization"] == "Bearer test-key"
 
     def test_factory_still_rejects_anthropic_model(self):
         from extraction.llm_client import create_llm_client

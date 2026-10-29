@@ -1,19 +1,22 @@
 """LLM client abstraction for requirement extraction.
 
-PRODUCTION POLICY — OpenAI and Gemini are the supported providers.
+The default production provider is Cohere. OpenAI and Gemini clients remain
+available for existing deployments that explicitly select their model names.
 
-The production extraction factory (`get_client` / `create_llm_client`) resolves to
-`OpenAILLMClient` or `GeminiLLMClient` based on the configured model name, and FAILS
-FAST when the configuration is invalid:
+The production extraction factory (`get_client` / `create_llm_client`) resolves the
+configured model name to a provider client, and FAILS FAST when configuration is invalid:
 
-- `EXTRACTION_MODEL` unset -> default `gpt-4o-mini`.
-- Missing API key for the resolved provider (`OPENAI_API_KEY` / `GEMINI_API_KEY`) ->
+- `EXTRACTION_MODEL` unset -> default `command-a-03-2025` (Cohere).
+- Missing API key for the resolved provider (`COHERE_API_KEY`, `OPENAI_API_KEY`,
+  or `GEMINI_API_KEY`) ->
   RuntimeError. There is NO silent fallback to a mock or to another provider, and no
   fake requirement is ever manufactured.
 - any unsupported model name (e.g. `claude-*`, or the test-only `mock-llm-v1`) -> ValueError.
 
 Implementations:
 
+- `CohereLLMClient` (`command-*`) - requires COHERE_API_KEY. Uses JSON response mode
+  and the same governance, response cache, and usage tracking as other production clients.
 - `OpenAILLMClient` (gpt-4o-mini, gpt-4o, ...) - requires OPENAI_API_KEY. Uses JSON
   response mode, temperature=0, exponential retries on 429/5xx with backoff, and routes
   every call through the LLM governance layer (rate limiting, budget, provider-namespaced
@@ -54,12 +57,14 @@ logger = get_logger(__name__)
 # API keys into the hermetic suite (conftest strips them at module load).
 # TESTING=true is the pytest convention; normal scripts/CLI still load .env.
 if not os.environ.get("TESTING"):
-    dotenv.load_dotenv()  # load OPENAI_API_KEY from .env if present (prod/dev only)
+    dotenv.load_dotenv()  # load provider keys from .env in dev/prod only
 
 PROMPT_VERSION = "requirement_extraction_v4"
+DEFAULT_EXTRACTION_MODEL = "command-a-03-2025"
 DEFAULT_OPENAI_MODEL = "gpt-4o-mini"
 OPENAI_PROVIDER = "openai"
 GEMINI_PROVIDER = "gemini"
+COHERE_PROVIDER = "cohere"
 # Namespacing version for the requirement output contract (schema/requirements.schema.json).
 SCHEMA_VERSION = "requirements.schema.json@v1"
 
@@ -930,12 +935,171 @@ class GeminiLLMClient(LLMClient):
         ]
 
 
+class CohereLLMClient(LLMClient):
+    model_name = DEFAULT_EXTRACTION_MODEL
+    ENDPOINT = "https://api.cohere.com/v2/chat"
+
+    def __init__(self, api_key: str | None = None, model: str | None = None,
+                 visa_category: str | None = None, governance=None):
+        self.api_key = api_key or os.environ.get("COHERE_API_KEY")
+        if model:
+            self.model_name = model
+        if not self._is_cohere_model(self.model_name):
+            raise ValueError(
+                f"Unsupported extraction model {self.model_name!r}: CohereLLMClient only "
+                "supports Cohere command-* models."
+            )
+        if not self.api_key:
+            raise RuntimeError(
+                "COHERE_API_KEY is required for Cohere extraction. Set it in the "
+                "environment; never hardcode the key. There is no silent fallback."
+            )
+        self.visa_category = visa_category
+        if governance is None:
+            from llm_governance import LLMGovernance
+            governance = LLMGovernance()
+        self.governance = governance
+        self._gov_key = "cohere-shared"
+        prompt_path = _get_prompt_path(visa_category)
+        with open(prompt_path, "r", encoding="utf-8") as f:
+            self._system_prompt = f.read()
+
+    @staticmethod
+    def _is_cohere_model(model: str) -> bool:
+        return model.startswith("command-")
+
+    def _messages_for_cache(self, input_context: dict) -> list[dict]:
+        return [
+            {"role": "system", "content": self._system_prompt},
+            {"role": "user", "content": json.dumps(input_context, indent=2)},
+        ]
+
+    def _call_cohere(self, input_context: dict) -> tuple[str, int, int, int]:
+        import time
+        import requests
+
+        payload = {
+            "model": self.model_name,
+            "messages": self._messages_for_cache(input_context),
+            "stream": False,
+            "temperature": 0.0,
+            "max_tokens": 4000,
+            "response_format": {"type": "json_object"},
+        }
+        backoff_seconds = [5, 15, 45]
+        retries = 0
+        response = None
+        for attempt in range(len(backoff_seconds) + 1):
+            try:
+                response = requests.post(
+                    self.ENDPOINT,
+                    headers={
+                        "Authorization": f"Bearer {self.api_key}",
+                        "Content-Type": "application/json",
+                    },
+                    json=payload,
+                    timeout=180,
+                )
+            except (requests.Timeout, requests.ConnectionError) as exc:
+                if attempt < len(backoff_seconds):
+                    time.sleep(backoff_seconds[attempt])
+                    retries += 1
+                    continue
+                raise RuntimeError(
+                    f"Cohere API unreachable after retries ({exc.__class__.__name__}). "
+                    f"Model: {self.model_name}."
+                ) from exc
+
+            if (response.status_code == 429 or response.status_code >= 500) and attempt < len(backoff_seconds):
+                retry_after = response.headers.get("Retry-After")
+                wait = float(retry_after) if retry_after else backoff_seconds[attempt]
+                time.sleep(min(wait, 60))
+                retries += 1
+                continue
+            break
+
+        if response.status_code == 429:
+            raise QuotaExhaustedError(
+                f"Cohere API rate limit/quota error (429). Model: {self.model_name}."
+            )
+        if response.status_code >= 500:
+            raise RuntimeError(
+                f"Cohere API server error ({response.status_code}) after retries. "
+                f"Model: {self.model_name}. Transient - re-run later."
+            )
+        response.raise_for_status()
+        data = response.json()
+        message = data.get("message") or {}
+        blocks = message.get("content") or []
+        content = "\n".join(
+            block.get("text", "") for block in blocks if block.get("type") == "text"
+        )
+        usage = data.get("usage") or {}
+        tokens = usage.get("tokens") or usage.get("billed_units") or {}
+        tokens_in = int(tokens.get("input_tokens", 0) or 0)
+        tokens_out = int(tokens.get("output_tokens", 0) or 0)
+        if not content.strip():
+            raise RuntimeError(
+                f"Cohere returned an empty extraction response. Model: {self.model_name}. "
+                "The extraction failed safely; no requirement was manufactured."
+            )
+        return content, tokens_in, tokens_out, retries
+
+    def extract(self, input_context: dict) -> str:
+        import time
+
+        messages = self._messages_for_cache(input_context)
+        gate = self.governance.pre_request(
+            key=self._gov_key, model=self.model_name, messages=messages,
+            prompt_version=PROMPT_VERSION, schema_version=SCHEMA_VERSION, temperature=0.0,
+            provider=COHERE_PROVIDER, wait=True,
+        )
+        if gate.get("blocked"):
+            exc_cls = QuotaExhaustedError if gate.get("reason") == "rate_limit_exceeded" else RuntimeError
+            raise exc_cls(
+                f"Cohere extraction blocked by LLM governance "
+                f"({gate.get('reason')}). Model: {self.model_name}."
+            )
+        if gate.get("cached"):
+            return gate["cached_response"]
+
+        start = time.perf_counter()
+        try:
+            content, tokens_in, tokens_out, retries = self._call_cohere(input_context)
+        except Exception as exc:
+            self.governance.post_request(
+                key=self._gov_key, model=self.model_name, messages=messages, response=None,
+                tokens_in=0, tokens_out=0,
+                latency_ms=(time.perf_counter() - start) * 1000.0, retries=0,
+                error=f"{exc.__class__.__name__}: {exc}",
+                prompt_version=PROMPT_VERSION, schema_version=SCHEMA_VERSION,
+                temperature=0.0, provider=COHERE_PROVIDER,
+            )
+            raise
+
+        latency_ms = (time.perf_counter() - start) * 1000.0
+        self.governance.post_request(
+            key=self._gov_key, model=self.model_name, messages=messages, response=content,
+            tokens_in=tokens_in, tokens_out=tokens_out, latency_ms=latency_ms, retries=retries,
+            prompt_version=PROMPT_VERSION, schema_version=SCHEMA_VERSION,
+            temperature=0.0, provider=COHERE_PROVIDER,
+        )
+        logger.info(
+            "Cohere extraction request completed",
+            extra={"model": self.model_name, "provider": COHERE_PROVIDER,
+                   "prompt_version": PROMPT_VERSION, "tokens_in": tokens_in,
+                   "tokens_out": tokens_out, "latency_ms": round(latency_ms, 1),
+                   "retries": retries},
+        )
+        return content
+
+
 def get_client(model: str | None = None, visa_category: str | None = None,
                 governance=None) -> LLMClient:
-    """Production factory — resolves to OpenAILLMClient or GeminiLLMClient.
+    """Resolve the configured model to a provider client.
 
     Resolves `model` from the argument, then `EXTRACTION_MODEL`, falling back to
-    ``DEFAULT_OPENAI_MODEL``.  Any unsupported model (including the test-only
+    ``DEFAULT_EXTRACTION_MODEL``. Any unsupported model (including the test-only
     ``mock-llm-v1`` or an unsupported provider such as Anthropic) raises immediately
     so that production never silently falls back to fake requirement output.  A
     missing API key for the resolved provider also fails fast.
@@ -949,22 +1113,23 @@ def get_client(model: str | None = None, visa_category: str | None = None,
     instead of resetting on every single `get_client()` call.
     """
     if model is None:
-        model = os.getenv("EXTRACTION_MODEL", DEFAULT_OPENAI_MODEL)
+        model = os.getenv("EXTRACTION_MODEL", DEFAULT_EXTRACTION_MODEL)
 
     if model == MockLLMClient.model_name:
         raise ValueError(
             "mock-llm-v1 is a test-only deterministic double and must not be selected "
             "in production.  Set EXTRACTION_MODEL to a supported model "
-            "(e.g. EXTRACTION_MODEL=gpt-4o-mini or EXTRACTION_MODEL=gemini-flash-lite-latest)."
+            "(e.g. EXTRACTION_MODEL=command-a-03-2025)."
         )
+    if CohereLLMClient._is_cohere_model(model):
+        return CohereLLMClient(model=model, visa_category=visa_category, governance=governance)
     if OpenAILLMClient._is_openai_model(model):
         return OpenAILLMClient(model=model, visa_category=visa_category, governance=governance)
     if GeminiLLMClient._is_gemini_model(model):
         return GeminiLLMClient(model=model, visa_category=visa_category, governance=governance)
     raise ValueError(
-        f"Unsupported extraction model {model!r}.  Supported providers are OpenAI "
-        "(examples: gpt-4o-mini, gpt-4o, ft:gpt-4o-mini-...) and Gemini "
-        "(examples: gemini-flash-lite-latest, gemini-1.5-pro)."
+        f"Unsupported extraction model {model!r}. Use a Cohere command-* model "
+        "such as command-a-03-2025."
     )
 
 

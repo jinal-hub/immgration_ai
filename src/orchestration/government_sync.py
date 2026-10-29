@@ -745,6 +745,10 @@ def _sync_sources(
             # one URL we happened to ask for.
             until = blocked_until(session, src.url, now)
             if until is not None:
+                message = (
+                    f"Host {host_of(src.url)} refused an earlier request; "
+                    f"this source was skipped until {until.isoformat()}."
+                )
                 logger.info(
                     "Source skipped — host is in a refusal cooldown",
                     extra={
@@ -753,6 +757,11 @@ def _sync_sources(
                         "cooldown_until": until.isoformat(),
                     },
                 )
+                results.append(SyncResult(
+                    source_id=src.source_id,
+                    status="cooldown",
+                    errors=[message],
+                ))
                 continue
         if (
             trigger_type == "SCHEDULED"

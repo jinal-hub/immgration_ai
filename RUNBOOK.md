@@ -42,15 +42,15 @@ docker run --rm -v immigration-knowledge-prod_raw_snapshots:/raw -v <pwd>:/backu
 
 3. **ADMIN_PASSWORD**: Update in your external environment file. Re-run API startup to bootstrap with new password.
 
-4. **OPENAI_API_KEY / GEMINI_API_KEY**: Rotate in your external environment file. Update `EXTRACTION_MODEL` if needed.
+4. **COHERE_API_KEY**: Rotate in your external environment file. Update `EXTRACTION_MODEL` if needed.
 
 5. **CORS_ORIGINS**: Update `https://${DOMAIN}` if the domain changes in your external environment file.
 
 ## Cooldown Management
 
-- **Host refusal cooldown**: When a government host (e.g., Home Affairs WAF) refuses a request (HTTP 403/429), the source is paused for `FETCH_COOLDOWN_HOURS` (default 24h).
+- **Host refusal cooldown**: When a government host (e.g., Home Affairs WAF) refuses a request (HTTP 403/429), the source is paused for `FETCH_COOLDOWN_HOURS` (default 15 minutes). Existing cooldowns keep their recorded expiry.
 - **Audit log**: All refusal events are recorded in the `fetch_log` table with `error_type` and `blocked_until`.
-- **Manual override**: Use the admin UI "Run now" button after the cooldown expires, or use `POST /api/v1/admin/sync` with forced request (bypasses cooldown - only for trusted operators).
+- **Manual retry**: Use the admin UI "Run now" button after the cooldown expires. A forced request cannot bypass an active cooldown.
 
 ## Adding a New Source
 

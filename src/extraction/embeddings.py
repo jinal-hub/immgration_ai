@@ -33,14 +33,12 @@ from logging_config import get_logger
 logger = get_logger(__name__)
 
 
-DEFAULT_EMBEDDING_MODEL = "text-embedding-3-small"
+DEFAULT_EMBEDDING_MODEL = "embed-v4.0"
 MOCK_EMBEDDING_MODEL = "mock-embedding-v1"
 
-# The only models whose output fits the column. text-embedding-3-large is
-# 3072 dimensions and would not fit a VECTOR(1536) column.
+# Cohere Embed v4 supports a 1536-dimensional output matching the stored column.
 SUPPORTED_EMBEDDING_MODELS = {
-    "text-embedding-3-small": EMBEDDING_DIMENSIONS,
-    "text-embedding-3-large": 3072,
+    "embed-v4.0": EMBEDDING_DIMENSIONS,
     "mock-embedding-v1": EMBEDDING_DIMENSIONS,
 }
 
@@ -108,14 +106,14 @@ class MockEmbeddingClient(EmbeddingClient):
         return [v / norm for v in vector]
 
 
-class OpenAIEmbeddingClient(EmbeddingClient):
-    """Embeddings through OpenAI's embeddings endpoint."""
+class CohereEmbeddingClient(EmbeddingClient):
+    """Cohere Embed v4 vectors for extracted document chunks and search queries."""
 
-    ENDPOINT = "https://api.openai.com/v1/embeddings"
+    ENDPOINT = "https://api.cohere.com/v2/embed"
 
     def __init__(self, api_key: str | None = None, model: str | None = None,
                  timeout: int = 120):
-        self.api_key = api_key or os.environ.get("OPENAI_API_KEY")
+        self.api_key = api_key or os.environ.get("COHERE_API_KEY")
         self.model_name = model or embedding_model()
         expected = SUPPORTED_EMBEDDING_MODELS.get(self.model_name)
         if expected is None:
@@ -131,13 +129,22 @@ class OpenAIEmbeddingClient(EmbeddingClient):
             )
         if not self.api_key:
             raise EmbeddingError(
-                "OPENAI_API_KEY is required for real embeddings. Set it in the "
+                "COHERE_API_KEY is required for real embeddings. Set it in the "
                 "environment; never hardcode it. To work offline, ask for the "
                 f"mock explicitly with EMBEDDING_MODEL={MOCK_EMBEDDING_MODEL}."
             )
         self.timeout = timeout
 
     def embed(self, texts: list[str]) -> list[list[float]]:
+        return self._embed(texts, input_type="search_document")
+
+    def embed_query(self, text: str) -> list[float]:
+        vectors = self._embed([text], input_type="search_query")
+        if not vectors:
+            raise EmbeddingError("embedding returned no vectors")
+        return vectors[0]
+
+    def _embed(self, texts: list[str], *, input_type: str) -> list[list[float]]:
         if not texts:
             return []
         import requests  # local import: only needed when this client is used
@@ -148,7 +155,13 @@ class OpenAIEmbeddingClient(EmbeddingClient):
                 "Authorization": f"Bearer {self.api_key}",
                 "Content-Type": "application/json",
             },
-            json={"model": self.model_name, "input": texts},
+            json={
+                "model": self.model_name,
+                "texts": texts,
+                "input_type": input_type,
+                "embedding_types": ["float"],
+                "output_dimension": EMBEDDING_DIMENSIONS,
+            },
             timeout=self.timeout,
         )
         if response.status_code != 200:
@@ -157,17 +170,17 @@ class OpenAIEmbeddingClient(EmbeddingClient):
                 f"{response.text[:200]}"
             )
         payload = response.json()
-        data = payload.get("data") or []
+        data = (payload.get("embeddings") or {}).get("float") or []
         if len(data) != len(texts):
             raise EmbeddingError(
-                f"embedding API returned {len(data)} vectors for {len(texts)} inputs"
+                f"Cohere returned {len(data)} vectors for {len(texts)} inputs"
             )
         vectors = []
         for item in data:
-            vector = [float(v) for v in item.get("embedding") or []]
+            vector = [float(v) for v in item]
             if len(vector) != EMBEDDING_DIMENSIONS:
                 raise EmbeddingError(
-                    f"embedding API returned a {len(vector)}-dimension vector, "
+                    f"Cohere returned a {len(vector)}-dimension vector, "
                     f"expected {EMBEDDING_DIMENSIONS}"
                 )
             vectors.append(vector)
@@ -188,7 +201,7 @@ def get_embedding_client() -> EmbeddingClient:
     model = embedding_model()
     if model == MOCK_EMBEDDING_MODEL:
         return MockEmbeddingClient(model=model)
-    return OpenAIEmbeddingClient(model=model)
+    return CohereEmbeddingClient(model=model)
 
 
 def cosine_similarity(a: list[float], b: list[float]) -> float:

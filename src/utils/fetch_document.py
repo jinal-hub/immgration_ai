@@ -11,8 +11,8 @@ This is the "real network" path that bootstraps a government source with no stor
 
 After a successful fetch + store it runs the Phase-2 requirement extraction contract
 (``run_requirement_extraction``) with the real extraction model.  The model is resolved
-via ``EXTRACTION_MODEL`` (defaulting to ``gpt-4o-mini``); the matching provider API key
-(OPENAI_API_KEY or GEMINI_API_KEY) must be set — there is no silent fallback to a mock
+via ``EXTRACTION_MODEL`` (defaulting to ``command-a-03-2025``); the matching provider API key
+(COHERE_API_KEY for the default Cohere model) must be set — there is no silent fallback to a mock
 or to any other provider.
 
 Everything here is ORM-driven on the session's transaction; Phase-2 persistence runs through
@@ -325,13 +325,13 @@ def read_raw_metadata(path: str | Path) -> dict[str, Any]:
 def _extraction_model() -> str:
     """Resolve the extraction model.
 
-    Honors EXTRACTION_MODEL from the environment (e.g. ``gpt-4o-mini`` or
-    ``gemini-flash-lite-latest``) and falls back to ``gpt-4o-mini`` when unset.  A
+    Honors EXTRACTION_MODEL from the environment and falls back to the default
+    Cohere model when unset. A
     missing API key for the resolved provider will fail fast when the client is
     constructed — there is no silent fallback to a mock or to any other provider.
     """
-    from llm_client import DEFAULT_OPENAI_MODEL
-    return os.getenv("EXTRACTION_MODEL", DEFAULT_OPENAI_MODEL)
+    from llm_client import DEFAULT_EXTRACTION_MODEL
+    return os.getenv("EXTRACTION_MODEL", DEFAULT_EXTRACTION_MODEL)
 
 # Extraction modules rely on flat imports against src/extraction.
 _EXTRACTION_DIR = Path(__file__).resolve().parent.parent / "extraction"
@@ -546,10 +546,10 @@ def run_requirement_extraction(
     """Run the Phase-2 requirement-extraction contract for a freshly stored document.
 
     Creates one ``extraction_runs`` row for the configured model (via
-    ``EXTRACTION_MODEL``, defaulting to ``gpt-4o-mini``), executes the requirement
-    contract over the document's chunks, and persists results through the legacy
-    Phase-2 repository.  A missing API key for the resolved provider (OPENAI_API_KEY
-    or GEMINI_API_KEY) will cause a hard failure; there is no silent fallback to a
+    ``EXTRACTION_MODEL``, defaulting to ``command-a-03-2025``), executes the requirement
+    contract over the document's extracted chunks, and persists results through the legacy
+    Phase-2 repository. A missing API key for the resolved provider will cause a hard
+    failure; there is no silent fallback to a
     mock or to any other provider.
     Returns the counters dict (same shape as ``run_extraction.py``).
     """
@@ -579,7 +579,7 @@ def run_requirement_extraction(
 
     # Record the extraction run via the ORM so counters defaults apply on every engine; the
     # legacy extraction repository is then reused unchanged for requirement persistence. The model
-    # is configurable via EXTRACTION_MODEL (defaults to the deterministic offline mock).
+    # is configurable via EXTRACTION_MODEL (defaults to the Cohere command model).
     dv = (
         session.query(DocumentVersion)
         .filter(

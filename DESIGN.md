@@ -107,7 +107,7 @@ document_chunks (Phase 1)
 chunk_selector.py       — recall-oriented candidate detection
         │
         ▼
-llm_client.py           — OpenAI or Gemini (production); MockLLMClient (unit tests only)
+llm_client.py           — Cohere by default (OpenAI/Gemini legacy model routing); MockLLMClient (unit tests only)
         │
         ▼
 requirement_validator.py — JSON Schema + logic consistency
@@ -1184,7 +1184,7 @@ Clock, sleep and RNG are injectable so tests run on a virtual clock and never sl
 
 **Refusal cooldown** (`src/orchestration/host_cooldown.py`). Only **403/429** are refusals; a timeout,
 DNS failure or 5xx is a *fault* and never pauses anything. A refusal upserts a `host_cooldowns` row
-(one per host, `cooldown_until = now + FETCH_COOLDOWN_HOURS`, default 6) and every source on that host
+(one per host, `cooldown_until = now + FETCH_COOLDOWN_HOURS`, default 0.25 hours / 15 minutes) and every source on that host
 is skipped until it expires — by a full sync, by a single-source sync, and surfaced to the admin UI
 ("Paused until" column, `409 host_cooldown` on manual run). A successful fetch clears the row. The
 reaction to a refusal is **pause only**: the IP, the User-Agent and the HTTP-vs-browser choice are

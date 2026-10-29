@@ -78,7 +78,26 @@ export function useSyncRunner(onSettled) {
 
       let message;
       if (typeof result.total_sources === "number") {
+        const cooldowns = result.cooldowns || 0;
         message = `${result.changed} source${result.changed === 1 ? "" : "s"} updated, ${result.errors} failed`;
+        if (cooldowns) {
+          message += `, ${cooldowns} paused by host cooldown`;
+        }
+        const failures = (result.results || []).filter(
+          (item) => item.status === "error" || item.status === "cooldown"
+        );
+        if (failures.length) {
+          const details = failures.slice(0, 2).map((item) => {
+            const reason =
+              item.errors?.[0] || item.last_error || item.fetch_status || item.status;
+            const clipped = reason.length > 140 ? `${reason.slice(0, 137)}...` : reason;
+            return `${item.source_id}: ${clipped}`;
+          });
+          message += ` — ${details.join("; ")}`;
+          if (failures.length > details.length) {
+            message += `; and ${failures.length - details.length} more (see Sources)`;
+          }
+        }
       } else if (result.source_id) {
         const plain = {
           changed: "content changed",
@@ -87,7 +106,12 @@ export function useSyncRunner(onSettled) {
           no_document: "no document found",
           cooldown: "paused — this host refused a request",
         };
+        const reason = result.errors?.[0] || result.last_error;
         message = `${result.source_id}: ${plain[result.status] || result.status}`;
+        if (reason) {
+          const clipped = reason.length > 180 ? `${reason.slice(0, 177)}...` : reason;
+          message += ` — ${clipped}`;
+        }
       } else {
         message = "Sync completed";
       }
@@ -125,7 +149,12 @@ export function useSyncRunner(onSettled) {
           if (job.status === "COMPLETED" || job.status === "FAILED") {
             stop();
             await summarize(job);
-            if (onSettledRef.current) onSettledRef.current();
+            // Small delay so the DB write for last_checked_at commits before
+            // we re-fetch the sources list — the in-memory job registry flips
+            // to COMPLETED slightly before SQLAlchemy flushes the final row.
+            setTimeout(() => {
+              if (onSettledRef.current) onSettledRef.current();
+            }, 500);
           } else {
             // Exponential back-off: double the interval up to the ceiling.
             pollIntervalRef.current = Math.min(

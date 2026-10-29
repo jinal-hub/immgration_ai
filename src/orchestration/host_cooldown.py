@@ -3,7 +3,7 @@
 A refusal is an HTTP 403 or 429 — the host telling us *don't*, as opposed to a
 timeout, DNS failure or 5xx, which are ordinary faults that say nothing about
 our standing. When a host refuses, every source on that host is paused for
-``FETCH_COOLDOWN_HOURS`` (default 6) and the sync layer skips them until the
+``FETCH_COOLDOWN_HOURS`` (default 0.25 / 15 minutes) and the sync layer skips them until the
 pause expires.
 
 Deliberate non-goals — see DESIGN.md. A refusal is never answered by changing
@@ -26,14 +26,14 @@ from logging_config import get_logger
 
 logger = get_logger(__name__)
 
-DEFAULT_COOLDOWN_HOURS = 6.0
+DEFAULT_COOLDOWN_HOURS = 0.25
 
 #: The statuses that mean "refused", not merely "failed".
 REFUSAL_HTTP_STATUSES = frozenset({403, 429})
 
 
 def cooldown_hours() -> float:
-    """``FETCH_COOLDOWN_HOURS``, default 6. A malformed value falls back."""
+    """``FETCH_COOLDOWN_HOURS``, default 0.25 (15 minutes)."""
     raw = (os.environ.get("FETCH_COOLDOWN_HOURS") or "").strip()
     if not raw:
         return DEFAULT_COOLDOWN_HOURS

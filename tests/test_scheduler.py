@@ -501,6 +501,28 @@ class TestBackgroundSyncJob:
         assert job["result"]["total_sources"] == 2
         assert job["result"]["changed"] == 1
         assert job["result"]["unchanged"] == 1
+        assert job["result"]["cooldowns"] == 0
+        assert job["result"]["results"] == [
+            {"source_id": "S1", "status": "changed", "errors": []},
+            {"source_id": "S2", "status": "unchanged", "errors": []},
+        ]
+
+    def test_background_result_preserves_source_errors(self, db_engine, monkeypatch):
+        class ErrorResult:
+            source_id = "SRC-FAILED"
+            status = "error"
+            errors = ["Playwright navigation timed out"]
+
+        self._stub_sync(monkeypatch, results=[ErrorResult()])
+        from scheduler import start_sync_background, get_sync_job
+
+        run_id = start_sync_background(db_engine, trigger_type="MANUAL")["run_id"]
+        _wait_for_lock_free()
+
+        item = get_sync_job(run_id)["result"]["results"][0]
+        assert item["source_id"] == "SRC-FAILED"
+        assert item["status"] == "error"
+        assert item["errors"] == ["Playwright navigation timed out"]
 
     def test_unknown_run_id_returns_none(self, db_engine):
         from scheduler import get_sync_job

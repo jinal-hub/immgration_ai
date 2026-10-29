@@ -77,8 +77,47 @@ export default function SourcesPage() {
       ),
     },
     { key: "status", header: "Status", render: (s) => <StatusBadge value={s.status} /> },
-    { key: "last_checked_at", header: "Last checked", render: (s) => formatDateTime(s.last_checked_at) },
-    { key: "fetch_status", header: "Last result", render: (s) => <StatusBadge value={s.fetch_status} /> },
+    {
+      key: "last_checked_at",
+      header: "Last checked",
+      render: (s) =>
+        s.last_checked_at ? (
+          formatDateTime(s.last_checked_at)
+        ) : isPaused(s) ? (
+          <span title="No fetch was attempted because another source on this host was refused.">
+            Not checked (host paused)
+          </span>
+        ) : (
+          "—"
+        ),
+    },
+    {
+      key: "fetch_status",
+      header: "Last result",
+      render: (s) => (
+        <div>
+          {s.fetch_status ? (
+            <StatusBadge value={s.fetch_status} />
+          ) : isPaused(s) ? (
+            <span title="The host cooldown prevented this source from being fetched.">
+              <StatusBadge value="INACTIVE" label="Skipped (host paused)" />
+            </span>
+          ) : (
+            <StatusBadge value={null} />
+          )}
+          {s.http_status && <div className="muted">HTTP {s.http_status}</div>}
+          {s.last_error && (
+            <div
+              className="muted"
+              title={s.last_error_type || undefined}
+              style={{ maxWidth: "280px", overflowWrap: "anywhere" }}
+            >
+              {s.last_error}
+            </div>
+          )}
+        </div>
+      ),
+    },
     { key: "consecutive_failures", header: "Failures", render: (s) => s.consecutive_failures ?? 0 },
     {
       key: "blocked_until",
