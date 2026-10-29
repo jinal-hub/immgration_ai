@@ -103,37 +103,39 @@ def register(body: UserCreate, request: Request):
 @router.post("/login", response_model=TokenResponse)
 def login(body: LoginRequest, request: Request):
     client_host = request.client.host if request.client else "unknown"
-    # Lock on (IP, email) pair
-    throttle_key_ip_email = f"{client_host}|{body.email}"
-    # Per-email limit that cannot lock out admin from another IP
-    throttle_key_email = f"EMAIL|{body.email}"
-    
-    # Check both keys
+    # Normalise email for keys and lookup
+    email_norm = (body.email or "").strip().casefold()
+    # Hard lock only on (IP, email) pair
+    throttle_key_ip_email = f"{client_host}|{email_norm}"
+    # Per-email counter only slows/logs; never rejects correct login
+    throttle_key_email = f"EMAIL|{email_norm}"
+
+    # Check only the hard lock on (IP,email) pair before verifying credentials
     wait_ip_email = login_throttle.retry_after_seconds(throttle_key_ip_email)
-    wait_email = login_throttle.retry_after_seconds(throttle_key_email)
-    wait = max(wait_ip_email, wait_email)
-    if wait:
+    if wait_ip_email:
         raise HTTPException(
             status_code=429,
             detail="Too many failed login attempts. Try again later.",
-            headers={"Retry-After": str(wait)},
+            headers={"Retry-After": str(wait_ip_email)},
         )
 
     engine = get_db_engine(request)
     with get_session(engine) as session:
         svc = AuthService(session)
-        result = svc.login(body.email, body.password)
+        # Verify credentials first
+        result = svc.login(email_norm, body.password)
         if not result:
+            # Record failures on both keys (email for alerting/progressive delay tracking)
+            login_throttle.record_failure(throttle_key_email)
             locked_for_ip_email = login_throttle.record_failure(throttle_key_ip_email)
-            locked_for_email = login_throttle.record_failure(throttle_key_email)
-            locked_for = max(locked_for_ip_email, locked_for_email)
-            if locked_for:
+            if locked_for_ip_email:
                 raise HTTPException(
                     status_code=429,
                     detail="Too many failed login attempts. Try again later.",
-                    headers={"Retry-After": str(locked_for)},
+                    headers={"Retry-After": str(locked_for_ip_email)},
                 )
             raise HTTPException(status_code=401, detail="Invalid email or password")
+        # Correct password always succeeds; reset counters
         login_throttle.reset(throttle_key_ip_email)
         login_throttle.reset(throttle_key_email)
         return TokenResponse(

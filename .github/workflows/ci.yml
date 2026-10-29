@@ -38,7 +38,7 @@ jobs:
         run: python -m compileall -q src
 
       - name: Lint with ruff
-        run: python -m ruff check . --select=ANN001,ANN003,COM812,EM101,PT001,S101 2>&1 | tail -20 || true
+        run: python -m ruff check src tests --select E9,F,F811 2>&1 | tail -30
 
       # The default suite makes no network calls, starts no browser and needs
       # no database: every external boundary is faked. Live checks are opt-in

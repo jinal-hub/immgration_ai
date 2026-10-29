@@ -3,42 +3,29 @@ updates:
   - package-ecosystem: pip
     directory: "/"
     schedule:
-      interval: weekly
-    open-pull-requests-limit: 5
+      interval: monthly
+    open-pull-requests-limit: 2
     groups:
-      # A single PR for the routine bumps keeps review focused on behaviour,
-      # not on a stream of one-line lockfile changes.
       python:
         patterns: ["*"]
-
-  - package-ecosystem: npm
-    directory: "/frontend"
-    schedule:
-      interval: weekly
-    open-pull-requests-limit: 5
-    groups:
-      frontend:
-        patterns: ["*"]
-        exclude-patterns: ["@playwright/*", "@axe-core/*", "axe-core"]
-      # Playwright and axe must move together with the browser revision the
-      # CI installs; separate PRs are easier to review and to revert.
-      browser-testing:
-        patterns: ["@playwright/*", "@axe-core/*", "axe-core"]
+    ignore:
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]
 
   - package-ecosystem: github-actions
     directory: "/"
     schedule:
-      interval: weekly
-    open-pull-requests-limit: 5
+      interval: monthly
+    open-pull-requests-limit: 2
 
-  - package-ecosystem: docker
-    directory: "/"
-    schedule:
-      interval: weekly
-    open-pull-requests-limit: 5
-
-  - package-ecosystem: docker
+  - package-ecosystem: npm
     directory: "/frontend"
     schedule:
-      interval: weekly
-    open-pull-requests-limit: 5
+      interval: monthly
+    open-pull-requests-limit: 2
+    groups:
+      frontend:
+        patterns: ["*"]
+    ignore:
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]
