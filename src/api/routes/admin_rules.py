@@ -40,6 +40,7 @@ CURATED_GOLD_SOURCES = {
     ("SRC-AU-189-MAIN", "DOC-GOLD-189-REAL"),
     ("SRC-AU-190-MAIN", "DOC-GOLD-190-REAL"),
 }
+REVIEWABLE_GOLD_STATUSES = {"DRAFT", "VALIDATED", "APPROVED"}
 
 
 # ---------------------------------------------------------------------------
@@ -525,8 +526,11 @@ def review_gold_rule(
             or (obj.source_id, obj.document_id) not in CURATED_GOLD_SOURCES
         ):
             raise HTTPException(status_code=400, detail="Only curated gold rules can use this action")
-        if obj.status != "DRAFT":
-            raise HTTPException(status_code=400, detail="Only DRAFT gold rules can be reviewed")
+        if obj.status not in REVIEWABLE_GOLD_STATUSES:
+            raise HTTPException(
+                status_code=400,
+                detail="Only pre-active gold rules can be reviewed",
+            )
 
         try:
             if body.decision == "REJECT":
@@ -534,10 +538,12 @@ def review_gold_rule(
                 repo.save_version_snapshot(rule_id, "REJECTED", actor)
             else:
                 _require_evaluable_confirmation(obj.field, body.confirm_not_evaluable)
-                repo.validate_rule(rule_id, actor=actor)
-                repo.save_version_snapshot(rule_id, "VALIDATED", actor)
-                repo.approve_rule(rule_id, actor=actor)
-                repo.save_version_snapshot(rule_id, "APPROVED", actor)
+                if obj.status == "DRAFT":
+                    obj = repo.validate_rule(rule_id, actor=actor)
+                    repo.save_version_snapshot(rule_id, "VALIDATED", actor)
+                if obj.status == "VALIDATED":
+                    obj = repo.approve_rule(rule_id, actor=actor)
+                    repo.save_version_snapshot(rule_id, "APPROVED", actor)
                 obj = repo.activate_rule(rule_id, actor=actor)
             return _orm_to_response(obj, _citation_for(session, obj))
         except ValueError as e:

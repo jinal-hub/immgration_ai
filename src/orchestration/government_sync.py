@@ -1,4 +1,4 @@
-﻿"""Government sync orchestrator — end-to-end pipeline from source to ACTIVE rules.
+"""Government sync orchestrator — end-to-end pipeline from source to ACTIVE rules.
 
 Pipeline:
     1. Real fetch every due source (no stored-hash short-circuit)
@@ -28,7 +28,7 @@ crawl_frequency gating:
 """
 from __future__ import annotations
 
-import json
+import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -36,11 +36,11 @@ from typing import Any
 from sqlalchemy.orm import Session
 
 from db.models import (
-    GovernmentSource, GovernmentDocument, DocumentVersion,
+    GovernmentSource, GovernmentDocument,
     DocumentChunk, Requirement, PipelineRun,
 )
 from change_detection.change_detector import ChangeType, classify_change
-from db.repositories import PipelineRunRepo
+from db.repositories import PipelineRunRepo, SyncJobRepo
 from rules.requirement_to_rule import compile_approved_requirements
 from rules.rule_engine import is_field_evaluable
 from rules.rule_repository import EnhancedRuleRepo
@@ -82,6 +82,9 @@ class SyncResult:
     rules_drafted: int = 0
     errors: list[str] = field(default_factory=list)
     timing: SourceTiming | None = None
+    # The per-source PipelineRun this result was recorded against (None when
+    # the source was skipped before any run was opened, e.g. host cooldown).
+    run_id: str | None = None
 
 
 def detect_change(session: Session, source_id: str) -> tuple[bool, str | None, str | None]:
@@ -459,8 +462,7 @@ def sync_source(session: Session, source_id: str,
     run_repo = PipelineRunRepo(session)
     rule_repo = EnhancedRuleRepo(session)
     run = run_repo.create(source_id=source_id, trigger_type=trigger_type)
-
-    result = SyncResult(source_id=source_id, status="error")
+    result = SyncResult(source_id=source_id, status="error", run_id=run.run_id)
 
     try:
         if dry_run:
@@ -697,13 +699,41 @@ def _finalize_change(
     return result
 
 
+def _job_source_status(result: SyncResult) -> str:
+    """Map a SyncResult.status onto the durable SyncJobSource vocabulary."""
+    status = (result.status or "").lower()
+    if status == "changed":
+        return "CHANGED"
+    if status == "unchanged":
+        return "UNCHANGED"
+    if status in ("cooldown", "no_document"):
+        return "SKIPPED"
+    return "ERROR"
+
+
+def _fetch_snapshot(session: Session, source_id: str) -> tuple[str | None, int | None]:
+    """Current persisted fetch diagnostics for a source, after a sync attempt."""
+    source = session.get(GovernmentSource, source_id)
+    if source is None:
+        return None, None
+    return source.fetch_status, source.http_status
+
+
 def sync_all_sources(session: Session, dry_run: bool = False,
-                     trigger_type: str = "ON_DEMAND") -> list[SyncResult]:
+                     trigger_type: str = "ON_DEMAND",
+                     sync_job_id: str | None = None) -> list[SyncResult]:
     """Sync all active government sources.
 
     Scheduled syncs (trigger_type="SCHEDULED", non-dry-run) skip ACTIVE sources
     that were checked more recently than their ``crawl_frequency``. Manual and
     on-demand syncs always re-fetch, so an admin can force a refresh.
+
+    Every non-dry-run source gets a durable SyncJobSource row *before* the
+    first fetch, and progress is committed per source. That is what makes a
+    multi-hour run survivable: a restart leaves an honest INTERRUPTED job with
+    the already-finished sources recorded, and ``sync_job_id`` can be passed
+    again to resume exactly the unfinished ones. ``sync_job_id`` also lets the
+    in-memory background-sync handle use the same id as the durable job.
 
     Every source in this run shares ONE browser (fetch.backend.new_session()),
     with a fresh context per source so cookies and storage never leak between
@@ -716,10 +746,35 @@ def sync_all_sources(session: Session, dry_run: bool = False,
         .filter(GovernmentSource.status == "ACTIVE")
         .all()
     )
+    source_ids = [src.source_id for src in sources]
+
+    job_id: str | None = None
+    if not dry_run:
+        job_id = sync_job_id or str(uuid.uuid4())
+        job_repo = SyncJobRepo(session)
+        if job_repo.get(job_id) is None:
+            job_repo.create(job_id, trigger_type, source_ids)
+        else:
+            job_repo.prepare_resume(job_id, source_ids)
+        # Durable before any network work: a killed process must still leave a
+        # resumable record instead of an empty table.
+        session.commit()
+        logger.info(
+            "Sync job started",
+            extra={
+                "sync_job_id": job_id,
+                "trigger_type": trigger_type,
+                "total_sources": len(source_ids),
+            },
+        )
+
     results = []
     browser_session = new_fetch_session() if not dry_run else None
     try:
-        results = _sync_sources(session, sources, dry_run, trigger_type, now, browser_session)
+        results = _sync_sources(
+            session, sources, dry_run, trigger_type, now, browser_session,
+            sync_job_id=job_id,
+        )
     finally:
         if browser_session is not None:
             browser_session.close()
@@ -736,69 +791,162 @@ def sync_all_sources(session: Session, dry_run: bool = False,
 def _sync_sources(
     session: Session, sources: list[GovernmentSource], dry_run: bool,
     trigger_type: str, now: datetime, browser_session,
+    sync_job_id: str | None = None,
 ) -> list[SyncResult]:
     results = []
-    for src in sources:
-        if not dry_run:
-            # A host that refused us is paused. Every source on it is skipped
-            # for the rest of the run — the refusal is about the host, not the
-            # one URL we happened to ask for.
-            until = blocked_until(session, src.url, now)
-            if until is not None:
-                message = (
-                    f"Host {host_of(src.url)} refused an earlier request; "
-                    f"this source was skipped until {until.isoformat()}."
-                )
-                logger.info(
-                    "Source skipped — host is in a refusal cooldown",
-                    extra={
-                        "source_id": src.source_id,
-                        "host": host_of(src.url),
-                        "cooldown_until": until.isoformat(),
-                    },
-                )
+    job_repo = SyncJobRepo(session) if sync_job_id else None
+
+    try:
+        for src in sources:
+            source_id = src.source_id
+            row = (
+                job_repo.get_source(sync_job_id, source_id)
+                if job_repo is not None else None
+            )
+            # A resume never re-fetches a source that already genuinely
+            # finished in the original run.
+            if row is not None and row.status in ("CHANGED", "UNCHANGED"):
                 results.append(SyncResult(
-                    source_id=src.source_id,
-                    status="cooldown",
-                    errors=[message],
+                    source_id=source_id, status=row.status.lower(),
                 ))
                 continue
-        if (
-            trigger_type == "SCHEDULED"
-            and not dry_run
-            and not _source_is_due(session, src, now)
-        ):
-            logger.info(
-                "Source skipped — not due per crawl_frequency",
-                extra={"source_id": src.source_id, "crawl_frequency": src.crawl_frequency},
-            )
-            continue
+
+            if job_repo is not None:
+                job_repo.mark_running(sync_job_id, source_id)
+                session.commit()
+
+            if not dry_run:
+                # A host that refused us is paused. Every source on it is skipped
+                # for the rest of the run - the refusal is about the host, not the
+                # one URL we happened to ask for.
+                until = blocked_until(session, src.url, now)
+                if until is not None:
+                    message = (
+                        f"Host {host_of(src.url)} refused an earlier request; "
+                        f"this source was skipped until {until.isoformat()}."
+                    )
+                    logger.info(
+                        "Source skipped - host is in a refusal cooldown",
+                        extra={
+                            "source_id": source_id,
+                            "host": host_of(src.url),
+                            "cooldown_until": until.isoformat(),
+                        },
+                    )
+                    result = SyncResult(
+                        source_id=source_id,
+                        status="cooldown",
+                        errors=[message],
+                    )
+                    if job_repo is not None:
+                        fetch_status, http_status = _fetch_snapshot(session, source_id)
+                        job_repo.mark_source(
+                            sync_job_id, source_id, "SKIPPED",
+                            reason="HOST_COOLDOWN", error=message,
+                            fetch_status=fetch_status, http_status=http_status,
+                        )
+                        session.commit()
+                    results.append(result)
+                    continue
+            if (
+                trigger_type == "SCHEDULED"
+                and not dry_run
+                and not _source_is_due(session, src, now)
+            ):
+                logger.info(
+                    "Source skipped - not due per crawl_frequency",
+                    extra={"source_id": source_id, "crawl_frequency": src.crawl_frequency},
+                )
+                if job_repo is not None:
+                    job_repo.mark_source(
+                        sync_job_id, source_id, "SKIPPED", reason="NOT_DUE",
+                    )
+                    session.commit()
+                continue
+            try:
+                result = sync_source(session, source_id, dry_run=dry_run,
+                                     trigger_type=trigger_type,
+                                     browser_session=browser_session)
+            except Exception as e:  # very last line of defence - never poison the batch
+                # A failed source must not terminate the sync: roll back its partial
+                # writes, record a FAILED PipelineRun on the fresh transaction, and
+                # continue with the remaining sources.
+                session.rollback()
+                failure_now = datetime.now(timezone.utc)
+                run = PipelineRun(
+                    source_id=source_id, trigger_type=trigger_type,
+                    status="FAILED",
+                    started_at=failure_now,
+                    completed_at=failure_now,
+                    errors=[f"Unhandled sync failure: {e}"],
+                )
+                session.add(run)
+                session.flush()
+                logger.error(
+                    "Source sync crashed unhandled - batch continues",
+                    extra={"source_id": source_id, "error": str(e),
+                           "run_id": run.run_id},
+                )
+                result = SyncResult(source_id=source_id, status="error",
+                                    errors=[str(e)], run_id=run.run_id)
+
+            if job_repo is not None:
+                fetch_status, http_status = _fetch_snapshot(session, source_id)
+                reason = None
+                if result.status == "cooldown":
+                    reason = "HOST_COOLDOWN"
+                elif result.status == "no_document":
+                    reason = "NO_DOCUMENT"
+                job_repo.mark_source(
+                    sync_job_id, source_id, _job_source_status(result),
+                    reason=reason,
+                    error="; ".join(result.errors) if result.errors else None,
+                    fetch_status=fetch_status, http_status=http_status,
+                    pipeline_run_id=result.run_id,
+                )
+                # Per-source commit is the whole point: everything up to and
+                # including this source is durable before the next fetch starts.
+                session.commit()
+            results.append(result)
+
+    except BaseException:
+        if job_repo is not None:
+            try:
+                session.rollback()
+                job_repo.interrupt(sync_job_id)
+                session.commit()
+            except Exception:
+                logger.exception(
+                    "Failed to mark sync job INTERRUPTED",
+                    extra={"sync_job_id": sync_job_id},
+                )
+        raise
+
+    if job_repo is not None:
         try:
-            result = sync_source(session, src.source_id, dry_run=dry_run,
-                                 trigger_type=trigger_type, browser_session=browser_session)
-        except Exception as e:  # very last line of defence — never poison the batch
-            # A failed source must not terminate the sync: roll back its partial
-            # writes, record a FAILED PipelineRun on the fresh transaction, and
-            # continue with the remaining sources.
+            job_repo.finish(sync_job_id)
+            session.commit()
+            job = job_repo.get(sync_job_id)
+            logger.info(
+                "Sync job finished",
+                extra={
+                    "sync_job_id": sync_job_id,
+                    "status": job.status if job else None,
+                    "total_sources": job.total_sources if job else None,
+                    "changed": job.changed_sources if job else None,
+                    "unchanged": job.unchanged_sources if job else None,
+                    "errors": job.error_sources if job else None,
+                    "skipped": job.skipped_sources if job else None,
+                },
+            )
+        except Exception:
+            # Source work is already durable; a failure to write the aggregate
+            # must not turn a successful batch into an exception. The job stays
+            # RUNNING and can be resumed/recovered.
             session.rollback()
-            now = datetime.now(timezone.utc)
-            run = PipelineRun(
-                source_id=src.source_id, trigger_type=trigger_type,
-                status="FAILED",
-                started_at=now,
-                completed_at=now,
-                errors=[f"Unhandled sync failure: {e}"],
+            logger.exception(
+                "Failed to finalize sync job", extra={"sync_job_id": sync_job_id},
             )
-            session.add(run)
-            session.flush()
-            logger.error(
-                "Source sync crashed unhandled — batch continues",
-                extra={"source_id": src.source_id, "error": str(e),
-                       "run_id": run.run_id},
-            )
-            result = SyncResult(source_id=src.source_id, status="error",
-                                errors=[str(e)])
-        results.append(result)
     return results
 
 

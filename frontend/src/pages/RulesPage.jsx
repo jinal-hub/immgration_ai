@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import * as api from "../api/client.js";
 import { useApi } from "../hooks/useApi.js";
 import { useToast } from "../components/ToastContext.jsx";
@@ -10,6 +10,13 @@ import RuleTestPanel from "../components/RuleTestPanel.jsx";
 import { TableSkeleton } from "../components/Skeleton.jsx";
 
 const STATUS_OPTIONS = ["", "DRAFT", "VALIDATED", "APPROVED", "ACTIVE", "REJECTED", "SUPERSEDED", "RETIRED"];
+const VISA_CATEGORIES = ["SKILLED", "WORK", "STUDENT", "VISITOR", "FAMILY", "BUSINESS", "HUMANITARIAN", "OTHER", "GENERAL"];
+
+function visaCategoryForProgram(programId) {
+  if (programId === "LEGISLATION_MIGRATION_REGS") return "SKILLED";
+  const prefix = String(programId || "").split("_", 1)[0];
+  return prefix === "AU" ? "GENERAL" : prefix;
+}
 
 function readableExpression(rule) {
   const parts = [rule.field, rule.operator, JSON.stringify(rule.value)];
@@ -39,16 +46,30 @@ const ACTION_FN = {
 
 export default function RulesPage() {
   const [status, setStatus] = useState("");
+  const [category, setCategory] = useState("");
   const [programId, setProgramId] = useState("");
   const [selected, setSelected] = useState(() => new Set());
   const [pendingConfirm, setPendingConfirm] = useState(null); // { action, ruleIds, label }
   const [testTarget, setTestTarget] = useState(null); // { programId, ruleIds }
   const { showToast } = useToast();
 
-  const rulesState = useApi(() => api.listRules({ status: status || undefined, programId: programId || undefined }), [
-    status,
-    programId,
-  ]);
+  const rulesState = useApi(() => api.listRules({ status: status || undefined }), [status]);
+  const availablePrograms = useMemo(
+    () =>
+      Array.from(new Set((rulesState.data || []).map((r) => r.program_id).filter(Boolean)))
+        .filter((id) => !category || visaCategoryForProgram(id) === category)
+        .sort(),
+    [rulesState.data, category]
+  );
+  const visibleRules = useMemo(
+    () =>
+      (rulesState.data || []).filter(
+        (rule) =>
+          (!category || visaCategoryForProgram(rule.program_id) === category) &&
+          (!programId || rule.program_id === programId)
+      ),
+    [rulesState.data, category, programId]
+  );
 
   function toggleSelect(ruleId) {
     setSelected((s) => {
@@ -149,8 +170,17 @@ export default function RulesPage() {
         />
       ),
     },
-    { key: "program_id", header: "Program" },
-    { key: "category", header: "Category" },
+    {
+      key: "program_id",
+      header: "Visa program",
+      render: (r) => (
+        <div>
+          <span className="badge badge-neutral">{visaCategoryForProgram(r.program_id)}</span>
+          <div>{r.program_id}</div>
+        </div>
+      ),
+    },
+    { key: "category", header: "Rule category" },
     { key: "expression", header: "Rule", render: (r) => <code>{readableExpression(r)}</code> },
     {
       key: "flags",
@@ -219,17 +249,42 @@ export default function RulesPage() {
           </select>
         </div>
         <div className="field">
+          <label htmlFor="rules-visa-category">Visa category</label>
+          <select
+            id="rules-visa-category"
+            value={category}
+            onChange={(e) => {
+              setCategory(e.target.value);
+              setProgramId("");
+            }}
+          >
+            <option value="">All categories</option>
+            {VISA_CATEGORIES.map((item) => (
+              <option key={item} value={item}>
+                {item}
+              </option>
+            ))}
+          </select>
+        </div>
+        <div className="field">
           <label htmlFor="rules-program">Program</label>
-          <input
+          <select
             id="rules-program"
             value={programId}
-            onChange={(e) => setProgramId(e.target.value.toUpperCase())}
-            placeholder="e.g. SKILLED_189"
-          />
+            onChange={(e) => setProgramId(e.target.value)}
+          >
+            <option value="">All programs</option>
+            {availablePrograms.map((id) => (
+              <option key={id} value={id}>
+                {id}
+              </option>
+            ))}
+          </select>
         </div>
         <div className="field" style={{ alignSelf: "flex-end", flex: "0 0 auto" }}>
           <button
             className="btn"
+            disabled={!programId}
             onClick={() =>
               setTestTarget({ programId, ruleIds: selected.size > 0 ? Array.from(selected) : undefined })
             }
@@ -265,12 +320,17 @@ export default function RulesPage() {
         </div>
       )}
 
+      <p className="muted">
+        Showing {visibleRules.length} rule{visibleRules.length === 1 ? "" : "s"} across{" "}
+        {new Set(visibleRules.map((r) => r.program_id)).size} program
+        {new Set(visibleRules.map((r) => r.program_id)).size === 1 ? "" : "s"}.
+      </p>
       <DataTable
         columns={columns}
-        rows={rulesState.data}
+        rows={visibleRules}
         rowKey={(r) => r.rule_id}
         emptyTitle="No rules match"
-        emptyMessage="Try a different status or program filter."
+        emptyMessage="Try a different status, visa category, or program."
       />
 
       {pendingConfirm && (

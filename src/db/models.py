@@ -12,22 +12,34 @@ Tables cover:
 from __future__ import annotations
 
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from sqlalchemy import (
-    Boolean, CheckConstraint, Column, DateTime, Enum, Float, ForeignKey,
-    ForeignKeyConstraint, Index, Integer, Numeric, SmallInteger, String, Text,
-    UUID, UniqueConstraint,
-    func, text,
+    UUID,
+    Boolean,
+    CheckConstraint,
+    Column,
+    DateTime,
+    Float,
+    ForeignKey,
+    ForeignKeyConstraint,
+    Index,
+    Integer,
+    Numeric,
+    SmallInteger,
+    String,
+    Text,
+    UniqueConstraint,
+    text,
 )
-from sqlalchemy.types import JSON
 from sqlalchemy.orm import DeclarativeBase, relationship
+from sqlalchemy.types import JSON
 
 from db.vector import EMBEDDING_DIMENSIONS, Vector
 
 
 def _utcnow() -> datetime:
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
 def _short_uuid() -> str:
@@ -323,6 +335,94 @@ class DocumentChunk(Base, TimestampMixin):
         # alternate key referenced by requirement_evidence lineage FK
         UniqueConstraint("chunk_id", "document_id", "version_id", name="uq_chunk_lineage"),
         CheckConstraint("order_index >= 0", name="ck_chunk_order_nonneg"),
+    )
+
+
+# ===========================================================================
+#  SYNC JOB TRACKING - one durable row per "sync all sources" execution and
+#  one durable row per source inside it. PipelineRun remains the per-source
+#  audit trail; these rows make batch progress survive a process restart and
+#  make a stalled/interrupted run resumable instead of silently starting over.
+# ===========================================================================
+
+class SyncJob(Base, TimestampMixin):
+    """Durable progress record for one all-sources sync execution.
+
+    Previously the only batch-level handle was an in-memory dict in
+    ``scheduler._sync_jobs``. A process restart (or the host killing a run that
+    takes hours because of per-host politeness spacing) lost the handle and all
+    knowledge of which sources had already been processed, so the next run
+    began again at source #1 and the observed "8 of 96 checked" state never
+    advanced. This row is created before the first fetch and committed with
+    per-source progress, so a restart leaves an honest INTERRUPTED record that
+    can be resumed.
+    """
+    __tablename__ = "sync_jobs"
+    job_id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    trigger_type = Column(String(16), nullable=False)
+    status = Column(String(16), nullable=False, default="PENDING")
+    total_sources = Column(Integer, nullable=False, default=0)
+    processed_sources = Column(Integer, nullable=False, default=0)
+    changed_sources = Column(Integer, nullable=False, default=0)
+    unchanged_sources = Column(Integer, nullable=False, default=0)
+    error_sources = Column(Integer, nullable=False, default=0)
+    skipped_sources = Column(Integer, nullable=False, default=0)
+    started_at = Column(DateTime(timezone=True))
+    completed_at = Column(DateTime(timezone=True))
+    heartbeat_at = Column(DateTime(timezone=True))
+    last_error = Column(Text)
+    metadata_json = Column(JSON, default=dict)
+
+    sources = relationship(
+        "SyncJobSource", back_populates="job", cascade="all, delete-orphan",
+    )
+
+    __table_args__ = (
+        Index("idx_sync_job_status", "status"),
+        Index("idx_sync_job_started", "started_at"),
+        CheckConstraint(
+            "status IN ('PENDING','RUNNING','COMPLETED','PARTIAL','FAILED','INTERRUPTED')",
+            name="ck_sync_job_status",
+        ),
+    )
+
+
+class SyncJobSource(Base, TimestampMixin):
+    """Durable per-source outcome inside a SyncJob.
+
+    Every source selected for the batch gets a row before the run starts -
+    including sources later skipped because their host is in a refusal cooldown
+    or because a scheduled run finds them not due. Those skips used to persist
+    nothing at all, which is why 88 sources looked "never attempted" even
+    though the run had reached them. ``reason`` makes the distinction explicit.
+    """
+    __tablename__ = "sync_job_sources"
+    job_id = Column(
+        String(36), ForeignKey("sync_jobs.job_id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    source_id = Column(String(32), primary_key=True)
+    status = Column(String(16), nullable=False, default="PENDING")
+    reason = Column(String(64))
+    fetch_status = Column(String(32))
+    http_status = Column(Integer)
+    error = Column(Text)
+    # Plain string (not an FK): a PipelineRun can be rolled back/reinserted by
+    # the failure handler, and the job row must remain writable regardless.
+    pipeline_run_id = Column(String(36))
+    attempt = Column(Integer, nullable=False, default=0)
+    started_at = Column(DateTime(timezone=True))
+    completed_at = Column(DateTime(timezone=True))
+
+    job = relationship("SyncJob", back_populates="sources")
+
+    __table_args__ = (
+        Index("idx_sync_job_source_status", "job_id", "status"),
+        Index("idx_sync_job_source_source", "source_id"),
+        CheckConstraint(
+            "status IN ('PENDING','RUNNING','CHANGED','UNCHANGED','ERROR','SKIPPED','INTERRUPTED')",
+            name="ck_sync_job_source_status",
+        ),
     )
 
 
@@ -929,9 +1029,170 @@ class ApiUser(Base, TimestampMixin):
     full_name = Column(String(256))
     role = Column(String(32), nullable=False, default="applicant")  # applicant/admin
     is_active = Column(Boolean, nullable=False, default=True)
+    auth_version = Column(Integer, nullable=False, default=0, server_default=text("0"))
     last_login_at = Column(DateTime(timezone=True))
 
     __table_args__ = (Index("idx_user_email", "email"),)
+
+
+class ConsultancyTenant(Base, TimestampMixin):
+    __tablename__ = "consultancy_tenants"
+    tenant_id = UUIDColumn(primary_key=True)
+    name = Column(String(200), nullable=False)
+    slug = Column(String(120), nullable=False, unique=True)
+    status = Column(String(16), nullable=False, default="ACTIVE")
+    created_by = Column(
+        UUID(as_uuid=False), ForeignKey("api_users.user_id"), nullable=False,
+    )
+
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('ACTIVE','SUSPENDED')",
+            name="ck_consultancy_tenant_status",
+        ),
+    )
+
+
+class TenantMembership(Base, TimestampMixin):
+    __tablename__ = "tenant_memberships"
+    membership_id = UUIDColumn(primary_key=True)
+    tenant_id = Column(
+        UUID(as_uuid=False),
+        ForeignKey("consultancy_tenants.tenant_id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    user_id = Column(
+        UUID(as_uuid=False), ForeignKey("api_users.user_id"), nullable=False,
+    )
+    role = Column(String(16), nullable=False)
+    status = Column(String(16), nullable=False, default="ACTIVE")
+
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "user_id", name="uq_tenant_member_user"),
+        Index("idx_tenant_membership_user", "user_id", "status"),
+        Index(
+            "uq_tenant_active_owner",
+            "tenant_id",
+            unique=True,
+            sqlite_where=text("role = 'OWNER' AND status = 'ACTIVE'"),
+            postgresql_where=text("role = 'OWNER' AND status = 'ACTIVE'"),
+        ),
+        CheckConstraint(
+            "role IN ('OWNER','CONSULTANT','REVIEWER','APPLICANT')",
+            name="ck_tenant_membership_role",
+        ),
+        CheckConstraint(
+            "status IN ('ACTIVE','REVOKED')",
+            name="ck_tenant_membership_status",
+        ),
+    )
+
+
+class ApplicationCase(Base, TimestampMixin):
+    __tablename__ = "application_cases"
+    case_id = UUIDColumn(primary_key=True)
+    tenant_id = Column(
+        UUID(as_uuid=False),
+        ForeignKey("consultancy_tenants.tenant_id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    applicant_id = Column(
+        UUID(as_uuid=False),
+        ForeignKey("applicant_profiles.applicant_id"),
+        nullable=False,
+    )
+    program_id = Column(
+        String(32), ForeignKey("immigration_programs.program_id"), nullable=False,
+    )
+    created_by = Column(
+        UUID(as_uuid=False), ForeignKey("api_users.user_id"), nullable=False,
+    )
+    assigned_consultant_id = Column(
+        UUID(as_uuid=False), ForeignKey("api_users.user_id"),
+    )
+    assessment_id = Column(
+        UUID(as_uuid=False), ForeignKey("assessments.assessment_id"),
+    )
+    ruleset_id = Column(
+        String(36), ForeignKey("rulesets.ruleset_id"),
+    )
+    status = Column(String(24), nullable=False, default="DRAFT")
+    title = Column(String(200))
+
+    __table_args__ = (
+        UniqueConstraint("case_id", "tenant_id", name="uq_case_tenant"),
+        Index("idx_case_tenant_status", "tenant_id", "status"),
+        Index("idx_case_applicant", "applicant_id"),
+        Index("idx_case_assigned_consultant", "assigned_consultant_id", "status"),
+        CheckConstraint(
+            "status IN ('DRAFT','IN_PROGRESS','NEEDS_INFO','READY_FOR_REVIEW',"
+            "'CHANGES_REQUESTED','APPROVED','PACKAGE_READY','CLOSED')",
+            name="ck_application_case_status",
+        ),
+    )
+
+
+class CaseDocument(Base, TimestampMixin):
+    __tablename__ = "case_documents"
+    document_id = UUIDColumn(primary_key=True)
+    tenant_id = Column(
+        UUID(as_uuid=False),
+        ForeignKey("consultancy_tenants.tenant_id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    case_id = Column(UUID(as_uuid=False), nullable=False)
+    uploaded_by = Column(
+        UUID(as_uuid=False), ForeignKey("api_users.user_id"), nullable=False,
+    )
+    filename = Column(String(256), nullable=False)
+    content_type = Column(String(64), nullable=False)
+    size_bytes = Column(Integer, nullable=False)
+    sha256 = Column(String(64), nullable=False)
+    storage_key = Column(String(256), nullable=False, unique=True)
+    review_status = Column(String(24), nullable=False, default="PENDING_REVIEW")
+    checklist_item_id = Column(
+        UUID(as_uuid=False), ForeignKey("case_checklist_items.item_id", ondelete="SET NULL")
+    )
+    version = Column(Integer, nullable=False, default=1)
+    replaces_document_id = Column(
+        UUID(as_uuid=False), ForeignKey("case_documents.document_id", ondelete="SET NULL")
+    )
+    scanner_status = Column(String(24), nullable=False, default="NOT_CONFIGURED")  # NOT_CONFIGURED/PENDING/CLEAN/INFECTED/ERROR
+    scanner_detail = Column(Text)
+    rejection_reason = Column(Text)
+    reviewed_by = Column(
+        UUID(as_uuid=False), ForeignKey("api_users.user_id")
+    )
+    reviewed_at = Column(DateTime(timezone=True))
+
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["case_id", "tenant_id"],
+            ["application_cases.case_id", "application_cases.tenant_id"],
+            ondelete="CASCADE",
+            name="fk_case_document_case_tenant",
+        ),
+        Index("idx_case_document_tenant_case", "tenant_id", "case_id"),
+        CheckConstraint("size_bytes > 0", name="ck_case_document_size"),
+        CheckConstraint(
+            "review_status IN ('PENDING_REVIEW','ACCEPTED','REJECTED')",
+            name="ck_case_document_review_status",
+        ),
+    )
+
+
+class PasswordResetToken(Base, TimestampMixin):
+    __tablename__ = "password_reset_tokens"
+    reset_id = UUIDColumn(primary_key=True)
+    user_id = Column(UUID(as_uuid=False), ForeignKey("api_users.user_id"), nullable=False)
+    token_hash = Column(String(64), nullable=False, unique=True)
+    expires_at = Column(DateTime(timezone=True), nullable=False)
+    used_at = Column(DateTime(timezone=True))
+
+    __table_args__ = (
+        Index("idx_password_reset_user", "user_id"),
+        Index("idx_password_reset_expiry", "expires_at"),
+    )
 
 
 class UserSession(Base, TimestampMixin):
@@ -1007,4 +1268,158 @@ class LlmBudgetLog(Base):
 
     __table_args__ = (
         Index("idx_budget_period", "period", "period_start"),
+    )
+
+
+class TenantInvitation(Base, TimestampMixin):
+    """Pending tenant membership invitation. Accepted by the invited email owner."""
+    __tablename__ = "tenant_invitations"
+    invitation_id = UUIDColumn(primary_key=True)
+    tenant_id = Column(
+        UUID(as_uuid=False),
+        ForeignKey("consultancy_tenants.tenant_id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    email = Column(String(256), nullable=False)
+    role = Column(String(16), nullable=False)
+    token_hash = Column(String(64), nullable=False, unique=True)
+    invited_by = Column(
+        UUID(as_uuid=False), ForeignKey("api_users.user_id"), nullable=False
+    )
+    expires_at = Column(DateTime(timezone=True), nullable=False)
+    accepted_at = Column(DateTime(timezone=True))
+    revoked_at = Column(DateTime(timezone=True))
+
+    __table_args__ = (
+        CheckConstraint(
+            "role IN ('CONSULTANT', 'REVIEWER', 'APPLICANT')",
+            name="ck_tenant_invitation_role",
+        ),
+        Index("idx_invitation_tenant_email", "tenant_id", "email"),
+        Index("idx_invitation_token", "token_hash"),
+    )
+
+
+class CaseChecklistItem(Base, TimestampMixin):
+    """Checklist item for an application case: document or information required."""
+    __tablename__ = "case_checklist_items"
+    item_id = UUIDColumn(primary_key=True)
+    tenant_id = Column(
+        UUID(as_uuid=False),
+        ForeignKey("consultancy_tenants.tenant_id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    case_id = Column(UUID(as_uuid=False), nullable=False)
+    requirement_key = Column(String(128), nullable=False)
+    label = Column(String(200), nullable=False)
+    description = Column(Text)
+    category = Column(String(32), nullable=False)  # document / information / form
+    required = Column(Boolean, nullable=False, default=True)
+    status = Column(String(24), nullable=False, default="PENDING")  # PENDING/SUBMITTED/ACCEPTED/REJECTED/WAIVED
+    evidence_document_id = Column(
+        UUID(as_uuid=False), ForeignKey("case_documents.document_id", ondelete="SET NULL")
+    )
+    rejection_reason = Column(Text)
+    reviewed_by = Column(
+        UUID(as_uuid=False), ForeignKey("api_users.user_id")
+    )
+    reviewed_at = Column(DateTime(timezone=True))
+    position = Column(Integer, nullable=False, default=0)
+
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["case_id", "tenant_id"],
+            ["application_cases.case_id", "application_cases.tenant_id"],
+            name="fk_case_checklist_case_tenant",
+            ondelete="CASCADE",
+        ),
+        UniqueConstraint("case_id", "requirement_key", name="uq_case_checklist_requirement"),
+        Index("idx_case_checklist_case", "case_id", "status"),
+        CheckConstraint(
+            "status IN ('PENDING','SUBMITTED','ACCEPTED','REJECTED','WAIVED')",
+            name="ck_case_checklist_status",
+        ),
+        CheckConstraint(
+            "category IN ('document','information','form')",
+            name="ck_case_checklist_category",
+        ),
+    )
+
+
+class FormTemplate(Base):
+    """Versioned application form template. JSON schema describes the questions."""
+    __tablename__ = "form_templates"
+    template_id = UUIDColumn(primary_key=True)
+    tenant_id = Column(
+        UUID(as_uuid=False),
+        ForeignKey("consultancy_tenants.tenant_id", ondelete="CASCADE"),
+    )
+    form_key = Column(String(64), nullable=False)
+    version = Column(Integer, nullable=False, default=1)
+    title = Column(String(200), nullable=False)
+    program_id = Column(String(32), ForeignKey("immigration_programs.program_id"))
+    schema_json = Column(JSON, nullable=False, default=dict)
+    status = Column(String(16), nullable=False, default="PUBLISHED")
+    created_by = Column(
+        UUID(as_uuid=False), ForeignKey("api_users.user_id"), nullable=False
+    )
+    created_at = Column(DateTime(timezone=True), nullable=False, default=_utcnow)
+
+    __table_args__ = (
+        UniqueConstraint(
+            "tenant_id",
+            "form_key",
+            "version",
+            name="uq_form_template_tenant_key_version",
+        ),
+        Index(
+            "uq_form_template_global_key_version",
+            "form_key",
+            "version",
+            unique=True,
+            postgresql_where=tenant_id.is_(None),
+            sqlite_where=tenant_id.is_(None),
+        ),
+        Index("idx_form_template_tenant_program", "tenant_id", "program_id"),
+        Index("idx_form_template_program", "program_id"),
+        CheckConstraint("status IN ('PUBLISHED','ARCHIVED')", name="ck_form_template_status"),
+    )
+
+
+class FormAnswer(Base, TimestampMixin):
+    """Applicant/consultant answers to a form template, tied to a case."""
+    __tablename__ = "form_answers"
+    answer_id = UUIDColumn(primary_key=True)
+    tenant_id = Column(
+        UUID(as_uuid=False),
+        ForeignKey("consultancy_tenants.tenant_id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    case_id = Column(UUID(as_uuid=False), nullable=False)
+    template_id = Column(
+        UUID(as_uuid=False), ForeignKey("form_templates.template_id", ondelete="CASCADE"), nullable=False
+    )
+    answers_json = Column(JSON, nullable=False, default=dict)
+    status = Column(String(24), nullable=False, default="DRAFT")  # DRAFT/SUBMITTED/REVIEWED/APPROVED
+    submitted_at = Column(DateTime(timezone=True))
+    applicant_confirmed_at = Column(DateTime(timezone=True))
+    reviewed_by = Column(
+        UUID(as_uuid=False), ForeignKey("api_users.user_id")
+    )
+    reviewed_at = Column(DateTime(timezone=True))
+    review_notes = Column(Text)
+
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["case_id", "tenant_id"],
+            ["application_cases.case_id", "application_cases.tenant_id"],
+            name="fk_form_answer_case_tenant",
+            ondelete="CASCADE",
+        ),
+        UniqueConstraint("case_id", "template_id", name="uq_form_answer_case_template"),
+        Index("idx_form_answer_case", "case_id", "status"),
+        CheckConstraint(
+            "status IN ('DRAFT','SUBMITTED','REVIEWED','APPROVED')",
+            name="ck_form_answer_status",
+        ),
     )

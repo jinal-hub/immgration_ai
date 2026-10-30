@@ -32,6 +32,8 @@ function isPaused(source, now = Date.now()) {
 
 export default function SourcesPage() {
   const [tab, setTab] = useState("sources"); // "sources" | "discovered"
+  const [categoryFilter, setCategoryFilter] = useState("");
+  const [programFilter, setProgramFilter] = useState("");
   const sourcesState = useApi(() => api.listSources(), []);
   const { running, elapsedSeconds, runOne, runAll } = useSyncRunner(() => sourcesState.reload());
   const [showAddForm, setShowAddForm] = useState(false);
@@ -45,8 +47,29 @@ export default function SourcesPage() {
         seen.set(s.program_id, { program_id: s.program_id, country_id: s.country_id, visa_category: s.visa_category });
       }
     }
-    return Array.from(seen.values());
+    return Array.from(seen.values()).sort((a, b) => a.program_id.localeCompare(b.program_id));
   }, [sourcesState.data]);
+
+  const knownCategories = useMemo(
+    () => Array.from(new Set(knownPrograms.map((p) => p.visa_category))).sort(),
+    [knownPrograms]
+  );
+  const programsForCategory = useMemo(
+    () =>
+      knownPrograms.filter(
+        (p) => !categoryFilter || p.visa_category === categoryFilter
+      ),
+    [knownPrograms, categoryFilter]
+  );
+  const visibleSources = useMemo(
+    () =>
+      (sourcesState.data || []).filter(
+        (s) =>
+          (!categoryFilter || s.visa_category === categoryFilter) &&
+          (!programFilter || s.program_id === programFilter)
+      ),
+    [sourcesState.data, categoryFilter, programFilter]
+  );
 
   async function toggleEnabled(source) {
     const nextStatus = source.status === "DISABLED" ? "ACTIVE" : "DISABLED";
@@ -198,13 +221,50 @@ export default function SourcesPage() {
           ) : sourcesState.error ? (
             <ErrorState error={sourcesState.error} onRetry={sourcesState.reload} />
           ) : (
-            <DataTable
-              columns={columns}
-              rows={sourcesState.data}
-              rowKey={(s) => s.source_id}
-              emptyTitle="No sources yet"
-              emptyMessage="Add your first government source to start tracking it."
-            />
+            <>
+              <div className="form-row">
+                <div className="field">
+                  <label htmlFor="sources-category">Visa category</label>
+                  <select
+                    id="sources-category"
+                    value={categoryFilter}
+                    onChange={(e) => {
+                      setCategoryFilter(e.target.value);
+                      setProgramFilter("");
+                    }}
+                  >
+                    <option value="">All categories</option>
+                    {knownCategories.map((category) => (
+                      <option key={category} value={category}>
+                        {category}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                <div className="field">
+                  <label htmlFor="sources-program">Visa program</label>
+                  <select
+                    id="sources-program"
+                    value={programFilter}
+                    onChange={(e) => setProgramFilter(e.target.value)}
+                  >
+                    <option value="">All programs</option>
+                    {programsForCategory.map((program) => (
+                      <option key={program.program_id} value={program.program_id}>
+                        {program.program_id}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              </div>
+              <DataTable
+                columns={columns}
+                rows={visibleSources}
+                rowKey={(s) => s.source_id}
+                emptyTitle="No sources match"
+                emptyMessage="Try a different visa category or program."
+              />
+            </>
           )}
         </>
       )}

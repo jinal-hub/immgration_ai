@@ -133,4 +133,22 @@ describe("RulesPage", () => {
     );
     expect(await screen.findByText("Eligible")).toBeInTheDocument();
   });
+
+  it("filters rules by visa category and then by program", async () => {
+    const user = userEvent.setup();
+    api.listRules.mockResolvedValue([
+      rule({ rule_id: "SKILLED-RULE", program_id: "SKILLED_189", evidence_text: "Skilled evidence" }),
+      rule({ rule_id: "STUDENT-RULE", program_id: "STUDENT_500", evidence_text: "Student evidence" }),
+    ]);
+
+    renderPage();
+    await screen.findByText("Skilled evidence");
+
+    await user.selectOptions(screen.getByLabelText("Visa category"), "STUDENT");
+    expect(screen.getByText("Student evidence")).toBeInTheDocument();
+    expect(screen.queryByText("Skilled evidence")).not.toBeInTheDocument();
+
+    await user.selectOptions(screen.getByLabelText("Program"), "STUDENT_500");
+    expect(screen.getByText("Student evidence")).toBeInTheDocument();
+  });
 });

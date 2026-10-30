@@ -21,7 +21,7 @@ been exercised. No live government host or paid LLM is contacted by the test sui
 
 | Area | State |
 |---|---|
-| Source registry | 14 verified sources across SKILLED_189/190/491, WORK_482, STUDENT_500, VISITOR_600 and the Migration Regulations; seeded idempotently from `sources/source_registry.seed.json` |
+| Source registry | 96 sources across 8 visa/reference categories; all are scheduled daily. The 82 new URLs come from the source-only Australian visa directory. New, unsupported programs are `REFERENCE_ONLY` and remain hidden from applicant assessments. |
 | Fetch | One Playwright Chromium path, headless, honest `FETCH_USER_AGENT`, per-host spacing + jitter, `Crawl-delay`/`Retry-After`, refusal cooldown per host, optional static egress proxy. No User-Agent rotation, no IP rotation, no challenge solving |
 | Raw snapshots + versions | Immutable raw files on a Docker volume; SHA-256 content hashes; `INITIAL`/`CHANGED`/`UNCHANGED` classification; historical versions are never rewritten (append-only trigger) |
 | Extraction | Cohere Command A by default (`EXTRACTION_MODEL`); strict JSON schema; evidence must be an exact substring of the source chunk; dedup, cache, budget/rate governance; zero-chunk and schema failures are visible, not silent |
@@ -127,8 +127,34 @@ On startup the API creates or promotes an admin when both `ADMIN_EMAIL` and
 .\.venv\Scripts\python.exe src\create_admin.py --email admin@example.com --password '<strong>'
 ```
 
-Self-registration is **disabled by default** (`ALLOW_PUBLIC_REGISTRATION=false`)
-and, even when enabled, always creates an `applicant` - never an admin.
+Self-registration is enabled by default for the local Compose development stack
+so applicants can try the portal. Set `ALLOW_PUBLIC_REGISTRATION=false` to
+disable it. Production Compose always disables registration. Self-registration
+always creates an `applicant` - never an admin.
+
+### Applicant portal
+
+Start the local API and frontend, then open `http://localhost:5173/portal/register`
+to create an applicant account. Returning applicants can sign in at
+`http://localhost:5173/portal/login`; the existing admin sign-in remains at
+`http://localhost:5173/login`.
+
+Registration creates an owner-linked applicant profile, prefilled with the
+account name. Applicant details and assessment applications are saved against
+that profile in the same database used by the admin API. The admin Applicants
+page lists applicant accounts before profile completion as well as submitted
+profiles; use **Refresh** to reload new registrations. Public self-registration
+is enabled for local development in `.env.example`; production Compose explicitly
+keeps it disabled.
+
+Applicant profiles collect personal details and visa-category intake facts. Use
+the portal's **Create eligibility application** action to save the profile and
+assessment result, then reopen it from **Eligibility applications**. These are
+informational assessments, not government visa lodgements. Date of birth is
+used to calculate age when an age-based rule is assessed and no age was entered.
+To enable **Forgot your password?**, configure `SMTP_HOST`, `SMTP_PORT`, `SMTP_FROM`, and
+`APP_PUBLIC_URL`; provide `SMTP_USERNAME` and `SMTP_PASSWORD` together when the
+SMTP server requires authentication.
 
 ---
 
@@ -144,7 +170,13 @@ Copy `.env.example` and fill in only what you need. The most important values:
 | `ENVIRONMENT` | `development` | `production` fail-closes on weak/placeholder config |
 | `CORS_ORIGINS` | localhost 3000/5173 | Comma-separated origins; production requires absolute HTTPS, no localhost |
 | `ADMIN_EMAIL` / `ADMIN_PASSWORD` | unset | Idempotent admin bootstrap |
-| `ALLOW_PUBLIC_REGISTRATION` | `false` | Must be `true` for `/auth/register` |
+| `ALLOW_PUBLIC_REGISTRATION` | `true` in local Compose; `false` in production | Enables applicant registration; production Compose forces this off |
+| `APP_PUBLIC_URL` | `http://localhost:5173` locally | Public portal base URL used for password-reset links |
+| `SMTP_HOST` / `SMTP_FROM` | unset | Required to send password-reset emails; port defaults to 587 |
+| `SMTP_USERNAME` / `SMTP_PASSWORD` | unset | Optional SMTP authentication; configure both or neither |
+| `APPLICANT_DOCUMENT_STORAGE` | `local` | Private local storage in development; production Compose forces S3 |
+| `APPLICANT_DOCUMENT_S3_BUCKET` / `_REGION` | unset | Required S3-compatible private bucket and region in production |
+| `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` | unset | S3 signing credentials; supply through a secret manager, never commit them |
 | `PASSWORD_MIN_LENGTH` | 8 | API minimum; production refuses values below 8 |
 | `LOGIN_MAX_ATTEMPTS` / `LOGIN_LOCKOUT_SECONDS` | 5 / 900 | Per-email login throttle |
 | `SOURCE_ALLOWED_HOST_SUFFIXES` | `.gov.au` | Source host allowlist; never a bare wildcard |
@@ -162,6 +194,15 @@ Copy `.env.example` and fill in only what you need. The most important values:
 
 `GOVERNMENT_SYNC_INTERVAL_MINUTES` is a legacy interval mode; a schedule saved
 through `PUT /api/v1/admin/scheduler` wins on restart.
+
+Case-document uploads are limited to PDF, PNG, or JPEG files up to 10 MiB.
+The API stores them under generated keys, enforces case/tenant access on reads,
+and marks each upload `PENDING_REVIEW`; this is a manual review state, not an
+antivirus scan. S3 writes request AES-256 server-side encryption and no public
+ACL. Configure the bucket's public-access block and encryption policy as well.
+The raw upload endpoint accepts the file bytes as the request body and the
+original name as the `filename` query parameter:
+`POST /api/v1/cases/{case_id}/documents?filename=passport.pdf`.
 
 ---
 
@@ -252,10 +293,10 @@ money and change ranking.
 `frontend/` is a plain React + Vite console (no component framework):
 
 - **Dashboard** - source health, pipeline counters
-- **Sources** - status, host cooldown, "Run now", source detail and history
+- **Sources** - category/program filters, fetch status, host cooldown, "Run now", source detail and history
 - **Review** - requirement queue with evidence text
-- **Rules** - badges for not-evaluable rules, dry-run panel ("Test rules"), single and
-  batch transitions with typed confirmation
+- **Rules** - visa-category/program filters, not-evaluable badges, dry-run panel
+  ("Test rules"), single and batch transitions with typed confirmation
 - **Documents** - keyword/semantic search, versions, chunk diff
 - **Applicants** - cross-user read-only view
 - **Scheduler** - edit the daily sync schedule

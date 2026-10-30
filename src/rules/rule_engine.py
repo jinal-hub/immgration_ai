@@ -9,7 +9,7 @@ from typing import Any
 
 from assessment.applicant import APPLICANT_FACT_FIELDS
 from rules.models import Rule, RuleEvaluation, EvaluationStatus, EligibilityResult
-from rules.operators import evaluate_operator
+from rules.operators import SUPPORTED_OPERATORS, evaluate_operator
 
 # Phase 2 extraction (prompts/requirement_extraction_v2.md) documents rule.field
 # using dotted names like "applicant.points_score"; ApplicantProfile.to_rule_data()
@@ -74,20 +74,153 @@ def _resolve_field_value(rule_field: str, applicant_data: dict[str, Any]) -> Any
         return applicant_data[rule_field]
     normalized = rule_field[len("applicant."):] if rule_field.startswith("applicant.") else rule_field
     normalized = _FIELD_ALIASES.get(normalized, normalized)
+    if normalized == "visa_type":
+        return applicant_data.get("visa_subclass") or applicant_data.get("program_id")
     return applicant_data.get(normalized)
+
+
+def evaluate_predicate(predicate: Any, applicant_data: dict[str, Any]) -> EvaluationStatus:
+    """Evaluate a structured rule condition without interpreting free-text policy.
+
+    Supported predicates use ``{"field": ..., "operator": ..., "value": ...}``,
+    the legacy ``{"if": ..., "equals": ...}`` shape, or nested ``and``, ``or``,
+    and ``not`` expressions. Unsupported or incomplete structures remain UNKNOWN
+    so an unparsed legal exception can never silently disappear.
+    """
+    if not isinstance(predicate, dict):
+        return EvaluationStatus.UNKNOWN
+
+    if "and" in predicate:
+        children = predicate["and"]
+        if not isinstance(children, list) or not children:
+            return EvaluationStatus.UNKNOWN
+        statuses = [evaluate_predicate(child, applicant_data) for child in children]
+        if EvaluationStatus.FAIL in statuses:
+            return EvaluationStatus.FAIL
+        if EvaluationStatus.UNKNOWN in statuses:
+            return EvaluationStatus.UNKNOWN
+        return EvaluationStatus.PASS
+
+    if "or" in predicate:
+        children = predicate["or"]
+        if not isinstance(children, list) or not children:
+            return EvaluationStatus.UNKNOWN
+        statuses = [evaluate_predicate(child, applicant_data) for child in children]
+        if EvaluationStatus.PASS in statuses:
+            return EvaluationStatus.PASS
+        if EvaluationStatus.UNKNOWN in statuses:
+            return EvaluationStatus.UNKNOWN
+        return EvaluationStatus.FAIL
+
+    if "not" in predicate:
+        status = evaluate_predicate(predicate["not"], applicant_data)
+        if status == EvaluationStatus.PASS:
+            return EvaluationStatus.FAIL
+        if status == EvaluationStatus.FAIL:
+            return EvaluationStatus.PASS
+        return status
+
+    if "if" in predicate and "equals" in predicate:
+        rule_field = predicate["if"]
+        operator = "EQ"
+        expected = predicate["equals"]
+    else:
+        rule_field = predicate.get("field")
+        operator = predicate.get("operator")
+        expected = predicate.get("value")
+
+    if (
+        not isinstance(rule_field, str)
+        or not rule_field
+        or not isinstance(operator, str)
+    ):
+        return EvaluationStatus.UNKNOWN
+
+    operator = operator.upper()
+    if operator not in SUPPORTED_OPERATORS:
+        return EvaluationStatus.UNKNOWN
+    if (
+        operator not in ("EXISTS", "NOT_EXISTS")
+        and "value" not in predicate
+        and not ("if" in predicate and "equals" in predicate)
+    ):
+        return EvaluationStatus.UNKNOWN
+
+    actual = _resolve_field_value(rule_field, applicant_data)
+    if actual is None and operator not in ("EXISTS", "NOT_EXISTS"):
+        return EvaluationStatus.UNKNOWN
+    passed, reason = evaluate_operator(operator, actual, expected)
+    if reason.startswith("Type error during comparison:"):
+        return EvaluationStatus.UNKNOWN
+    return EvaluationStatus.PASS if passed else EvaluationStatus.FAIL
+
+
+def _evaluation_with_status(
+    rule: Rule,
+    status: EvaluationStatus,
+    reason: str,
+) -> RuleEvaluation:
+    return RuleEvaluation(
+        rule_id=rule.rule_id,
+        status=status,
+        field=rule.field,
+        actual_value=None,
+        expected_value=rule.value,
+        operator=rule.operator,
+        message=rule.message,
+        reason=reason,
+    )
 
 
 def evaluate_rule(rule: Rule, applicant_data: dict[str, Any]) -> RuleEvaluation:
     """Evaluate a single rule against applicant data.
 
-    Returns RuleEvaluation with status PASS, FAIL, or UNKNOWN.
+    A structured condition gates the base rule. A verified exception waives it;
+    an unknown condition/exception is never guessed from descriptive prose.
     """
+    if rule.condition is not None:
+        condition = evaluate_predicate(rule.condition, applicant_data)
+        if condition == EvaluationStatus.FAIL:
+            return _evaluation_with_status(
+                rule, EvaluationStatus.NOT_APPLICABLE,
+                "Rule condition is not met",
+            )
+        if condition != EvaluationStatus.PASS:
+            return _evaluation_with_status(
+                rule, EvaluationStatus.UNKNOWN,
+                "Rule condition is not structured or cannot be evaluated",
+            )
+
     actual_value = _resolve_field_value(rule.field, applicant_data)
 
     if rule.operator in ("EXISTS", "NOT_EXISTS"):
         passed, reason = evaluate_operator(rule.operator, actual_value, None)
         status = EvaluationStatus.PASS if passed else EvaluationStatus.FAIL
-        return RuleEvaluation(
+        base_evaluation = RuleEvaluation(
+            rule_id=rule.rule_id,
+            status=status,
+            field=rule.field,
+            actual_value=actual_value,
+            expected_value=rule.value,
+            operator=rule.operator,
+            message=rule.message,
+            reason=reason,
+        )
+    elif actual_value is None:
+        base_evaluation = RuleEvaluation(
+            rule_id=rule.rule_id,
+            status=EvaluationStatus.UNKNOWN,
+            field=rule.field,
+            actual_value=None,
+            expected_value=rule.value,
+            operator=rule.operator,
+            message=rule.message,
+            reason=f"Field '{rule.field}' not provided in applicant data",
+        )
+    else:
+        passed, reason = evaluate_operator(rule.operator, actual_value, rule.value)
+        status = EvaluationStatus.PASS if passed else EvaluationStatus.FAIL
+        base_evaluation = RuleEvaluation(
             rule_id=rule.rule_id,
             status=status,
             field=rule.field,
@@ -98,31 +231,36 @@ def evaluate_rule(rule: Rule, applicant_data: dict[str, Any]) -> RuleEvaluation:
             reason=reason,
         )
 
-    if actual_value is None:
+    if rule.exception is None:
+        return base_evaluation
+
+    exception = evaluate_predicate(rule.exception, applicant_data)
+    if exception == EvaluationStatus.PASS:
+        return RuleEvaluation(
+            rule_id=rule.rule_id,
+            status=EvaluationStatus.NOT_APPLICABLE,
+            field=rule.field,
+            actual_value=actual_value,
+            expected_value=rule.value,
+            operator=rule.operator,
+            message=rule.message,
+            reason="A verified exception waives this rule",
+        )
+    if (
+        exception == EvaluationStatus.UNKNOWN
+        and base_evaluation.status in (EvaluationStatus.FAIL, EvaluationStatus.UNKNOWN)
+    ):
         return RuleEvaluation(
             rule_id=rule.rule_id,
             status=EvaluationStatus.UNKNOWN,
             field=rule.field,
-            actual_value=None,
+            actual_value=actual_value,
             expected_value=rule.value,
             operator=rule.operator,
             message=rule.message,
-            reason=f"Field '{rule.field}' not provided in applicant data",
+            reason="Exception applicability is unknown",
         )
-
-    passed, reason = evaluate_operator(rule.operator, actual_value, rule.value)
-    status = EvaluationStatus.PASS if passed else EvaluationStatus.FAIL
-
-    return RuleEvaluation(
-        rule_id=rule.rule_id,
-        status=status,
-        field=rule.field,
-        actual_value=actual_value,
-        expected_value=rule.value,
-        operator=rule.operator,
-        message=rule.message,
-        reason=reason,
-    )
+    return base_evaluation
 
 
 def evaluate_all_rules(

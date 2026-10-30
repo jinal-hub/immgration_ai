@@ -36,14 +36,30 @@ export default function ApplicantsPage() {
       ),
     },
     { key: "owner_email", header: "Owner email" },
+    { key: "profile", header: "Profile", render: (a) => (
+      !a.profile_exists ? "Not started" :
+        [a.first_name, a.last_name].filter(Boolean).length === 2 ? "Started" : "Needs details"
+    ) },
     { key: "age", header: "Age" },
     { key: "points", header: "Points" },
-    { key: "visa_subclass", header: "Visa subclass" },
+    { key: "visa_subclass", header: "Target visa" },
+    {
+      key: "tenants",
+      header: "Consultancies",
+      render: (a) => a.tenant_memberships?.length
+        ? a.tenant_memberships.map((membership) => membership.tenant_name).join(", ")
+        : "None",
+    },
   ];
 
   return (
     <div>
-      <h1>Applicants</h1>
+      <div className="flex-between">
+        <h1>Applicants</h1>
+        <button className="btn btn-sm" onClick={applicantsState.reload} type="button">
+          Refresh
+        </button>
+      </div>
       <DataTable
         columns={columns}
         rows={applicants}

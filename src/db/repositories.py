@@ -20,6 +20,7 @@ from sqlalchemy.orm import Session
 
 from db.models import (
     ApplicantProfile as ApplicantProfileModel,
+    ApiUser,
     Assessment,
     AssessmentRuleResult,
     AuditLog,
@@ -40,9 +41,16 @@ from db.models import (
     RulesetRule,
     RuleVersion,
     SchedulerSettings,
+    SyncJob,
+    SyncJobSource,
     VisaSelection as VisaSelectionModel,
     RequirementVersion,
 )
+
+# Source outcomes that mean "this source is finished for this job"; a resume
+# must not re-fetch them.
+_SYNC_SUCCESS_STATUSES = ("CHANGED", "UNCHANGED")
+_SYNC_TERMINAL_STATUSES = ("CHANGED", "UNCHANGED", "ERROR", "SKIPPED", "INTERRUPTED")
 
 
 class CountryRepo:
@@ -459,6 +467,15 @@ class UserRepo:
         """Convenience wrapper — grant the admin role to a user."""
         return self.set_role(user_id, "admin")
 
+    def update_password(self, user_id: str, password_hash: str) -> ApiUser | None:
+        user = self.get(user_id)
+        if user is None:
+            return None
+        user.password_hash = password_hash
+        user.auth_version += 1
+        self._s.flush()
+        return user
+
 
 class ApplicantRepo:
     def __init__(self, session: Session):
@@ -549,6 +566,9 @@ class GapRepo:
     def __init__(self, session: Session):
         self._s = session
 
+    def get(self, gap_id: str) -> Gap | None:
+        return self._s.get(Gap, gap_id)
+
     def create(self, assessment_id: str, **kwargs) -> Gap:
         obj = Gap(assessment_id=assessment_id, **kwargs)
         self._s.add(obj)
@@ -625,6 +645,208 @@ class SchedulerSettingsRepo:
             setattr(obj, k, v)
         self._s.flush()
         return obj
+
+
+class SyncJobRepo:
+    """Durable batch progress for ``sync_all_sources``.
+
+    The repository deliberately commits nothing itself: the caller decides when
+    a progress update becomes durable. ``government_sync`` commits once per
+    source, which is the granularity that makes a long run survive a restart.
+    """
+
+    def __init__(self, session: Session):
+        self._s = session
+
+    def create(
+        self, job_id: str, trigger_type: str, source_ids: list[str],
+        metadata: dict[str, Any] | None = None,
+    ) -> SyncJob:
+        job = SyncJob(
+            job_id=job_id,
+            trigger_type=trigger_type,
+            status="PENDING",
+            total_sources=len(source_ids),
+            metadata_json=metadata or {},
+        )
+        self._s.add(job)
+        for source_id in source_ids:
+            self._s.add(SyncJobSource(
+                job_id=job_id, source_id=source_id, status="PENDING",
+            ))
+        self._s.flush()
+        return job
+
+    def get(self, job_id: str) -> SyncJob | None:
+        return self._s.get(SyncJob, job_id)
+
+    def get_source(self, job_id: str, source_id: str) -> SyncJobSource | None:
+        return self._s.get(SyncJobSource, (job_id, source_id))
+
+    def add_source(self, job_id: str, source_id: str) -> SyncJobSource:
+        row = SyncJobSource(job_id=job_id, source_id=source_id, status="PENDING")
+        self._s.add(row)
+        self._s.flush()
+        return row
+
+    def prepare_resume(self, job_id: str, source_ids: list[str]) -> SyncJob:
+        """Reset an existing job for a resume without losing completed work.
+
+        CHANGED/UNCHANGED sources stay terminal (they genuinely finished).
+        Everything else - pending, interrupted, failed, or skipped because a
+        host was cooling down - is retried. Sources added to the registry after
+        the original run get a fresh PENDING row.
+        """
+        job = self.get(job_id)
+        if job is None:
+            return self.create(job_id, "MANUAL", source_ids)
+        existing = {row.source_id for row in job.sources}
+        for source_id in source_ids:
+            if source_id not in existing:
+                self.add_source(job_id, source_id)
+        for row in job.sources:
+            if row.source_id not in source_ids:
+                continue
+            if row.status in _SYNC_SUCCESS_STATUSES:
+                continue
+            row.status = "PENDING"
+            row.reason = None
+            row.error = None
+            row.completed_at = None
+        job.status = "PENDING"
+        job.completed_at = None
+        job.last_error = None
+        self._s.flush()
+        return job
+
+    def mark_running(self, job_id: str, source_id: str) -> SyncJobSource:
+        row = self.get_source(job_id, source_id)
+        if row is None:
+            row = self.add_source(job_id, source_id)
+        now = datetime.now(timezone.utc)
+        job = self.get(job_id)
+        if job is not None:
+            job.status = "RUNNING"
+            if job.started_at is None:
+                job.started_at = now
+            job.heartbeat_at = now
+        row.status = "RUNNING"
+        row.attempt = (row.attempt or 0) + 1
+        row.started_at = row.started_at or now
+        row.completed_at = None
+        self._s.flush()
+        return row
+
+    def mark_source(
+        self, job_id: str, source_id: str, status: str,
+        *, reason: str | None = None, error: str | None = None,
+        fetch_status: str | None = None, http_status: int | None = None,
+        pipeline_run_id: str | None = None,
+    ) -> SyncJobSource:
+        if status not in _SYNC_TERMINAL_STATUSES:
+            raise ValueError(f"Not a terminal sync-job source status: {status}")
+        row = self.get_source(job_id, source_id)
+        if row is None:
+            row = self.add_source(job_id, source_id)
+        row.status = status
+        row.reason = reason
+        row.error = error
+        row.fetch_status = fetch_status
+        row.http_status = http_status
+        row.pipeline_run_id = pipeline_run_id
+        row.completed_at = datetime.now(timezone.utc)
+        if row.started_at is None:
+            row.started_at = row.completed_at
+        job = self.get(job_id)
+        if job is not None:
+            job.heartbeat_at = row.completed_at
+        self._s.flush()
+        return row
+
+    def refresh_counts(self, job_id: str) -> SyncJob:
+        job = self.get(job_id)
+        if job is None:
+            raise ValueError(f"SyncJob {job_id} not found")
+        rows = self._s.execute(
+            select(SyncJobSource.status, func.count())
+            .where(SyncJobSource.job_id == job_id)
+            .group_by(SyncJobSource.status)
+        ).all()
+        counts = {status: count for status, count in rows}
+        job.total_sources = sum(counts.values())
+        job.changed_sources = counts.get("CHANGED", 0)
+        job.unchanged_sources = counts.get("UNCHANGED", 0)
+        job.error_sources = counts.get("ERROR", 0)
+        job.skipped_sources = counts.get("SKIPPED", 0)
+        job.processed_sources = sum(
+            counts.get(status, 0) for status in _SYNC_TERMINAL_STATUSES
+        )
+        self._s.flush()
+        return job
+
+    def finish(self, job_id: str) -> SyncJob:
+        """Derive the final job status from per-source outcomes.
+
+        Skips are recorded honestly but do not by themselves make a run a
+        failure: a scheduled run legitimately skips sources that are not due,
+        and a host cooldown legitimately skips every source on that host. Only
+        real source errors turn the batch into PARTIAL/FAILED.
+        """
+        job = self.refresh_counts(job_id)
+        job.completed_at = datetime.now(timezone.utc)
+        job.heartbeat_at = job.completed_at
+        if job.error_sources == 0:
+            job.status = "COMPLETED"
+        elif (job.changed_sources + job.unchanged_sources) > 0:
+            job.status = "PARTIAL"
+        else:
+            job.status = "FAILED"
+        self._s.flush()
+        return job
+
+    def interrupt(self, job_id: str, error: str = "interrupted before completion") -> SyncJob:
+        job = self.get(job_id)
+        if job is None:
+            raise ValueError(f"SyncJob {job_id} not found")
+        now = datetime.now(timezone.utc)
+        for row in job.sources:
+            if row.status in ("PENDING", "RUNNING"):
+                row.status = "INTERRUPTED"
+                row.reason = "INTERRUPTED"
+                row.error = error
+                row.completed_at = now
+        job.status = "INTERRUPTED"
+        job.last_error = error
+        job.completed_at = now
+        job.heartbeat_at = now
+        self.refresh_counts(job_id)
+        # INTERRUPTED rows are terminal but are not errors; the job status is
+        # already set explicitly and must not be overwritten by finish().
+        job.status = "INTERRUPTED"
+        self._s.flush()
+        return job
+
+    def recover_orphans(self) -> int:
+        """Mark runs left RUNNING/PENDING by a killed process as INTERRUPTED.
+
+        Called at startup. Without this a restarted process would leave a
+        phantom RUNNING job forever, making it impossible to tell an in-flight
+        run from one the host killed.
+        """
+        jobs = self._s.execute(
+            select(SyncJob).where(SyncJob.status.in_(("PENDING", "RUNNING")))
+        ).scalars().all()
+        for job in jobs:
+            self.interrupt(job.job_id, "abandoned: process restarted")
+        return len(jobs)
+
+    def list_for_source(self, source_id: str, limit: int = 20) -> list[SyncJobSource]:
+        return list(self._s.execute(
+            select(SyncJobSource)
+            .where(SyncJobSource.source_id == source_id)
+            .order_by(SyncJobSource.completed_at.desc())
+            .limit(limit)
+        ).scalars())
 
 
 class PipelineRunRepo:

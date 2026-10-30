@@ -1,11 +1,10 @@
-"""Phase 3B-3: Exception handling — rule UNLESS exception.
+"""Phase 3B-3: Exception handling — a verified exception waives the base rule.
 
 Semantics:
-- Evaluate main rule and exception.
-- If exception applies AND main rule was PASS → FAIL (exception overrides).
-- If exception applies AND main rule was FAIL → FAIL (already failed).
-- If exception applies AND main rule was UNKNOWN → UNKNOWN (can't override).
-- If exception does NOT apply → main rule result unchanged.
+- Evaluate the base rule and exception.
+- If the exception applies → NOT_APPLICABLE (base requirement is waived).
+- If it does not apply → use the base rule result.
+- If applicability is unknown and the base rule fails/is unknown → UNKNOWN.
 
 Real examples:
 - "Age must be under 45" UNLESS "subclass 476 applies" (476 has different age limit).
@@ -48,7 +47,7 @@ class TestExceptionTruthTable:
     """ExceptionNode: main UNLESS exception."""
 
     def test_exception_applies_main_pass(self):
-        """Exception applies + main PASS -> FAIL (overridden)."""
+        """Exception applies + main PASS -> NOT_APPLICABLE (waived)."""
         node = ExceptionNode(RuleLeaf("MAIN"), RuleLeaf("EXCEPTION"))
         rules = {
             "MAIN": _make_rule("MAIN", "age", "LT", 45),
@@ -56,10 +55,10 @@ class TestExceptionTruthTable:
         }
         data = {"age": 30, "is_476": True}
         status, _ = evaluate_expression(node, rules, data)
-        assert status == EvaluationStatus.FAIL
+        assert status == EvaluationStatus.NOT_APPLICABLE
 
     def test_exception_applies_main_fail(self):
-        """Exception applies + main FAIL -> FAIL."""
+        """Exception applies + main FAIL -> NOT_APPLICABLE (waived)."""
         node = ExceptionNode(RuleLeaf("MAIN"), RuleLeaf("EXCEPTION"))
         rules = {
             "MAIN": _make_rule("MAIN", "age", "LT", 45),
@@ -67,10 +66,10 @@ class TestExceptionTruthTable:
         }
         data = {"age": 50, "is_476": True}
         status, _ = evaluate_expression(node, rules, data)
-        assert status == EvaluationStatus.FAIL
+        assert status == EvaluationStatus.NOT_APPLICABLE
 
     def test_exception_applies_main_unknown(self):
-        """Exception applies + main UNKNOWN -> UNKNOWN."""
+        """A verified exception waives the base rule even when its fact is unknown."""
         node = ExceptionNode(RuleLeaf("MAIN"), RuleLeaf("EXCEPTION"))
         rules = {
             "MAIN": _make_rule("MAIN", "age", "LT", 45),
@@ -78,7 +77,7 @@ class TestExceptionTruthTable:
         }
         data = {"is_476": True}
         status, _ = evaluate_expression(node, rules, data)
-        assert status == EvaluationStatus.UNKNOWN
+        assert status == EvaluationStatus.NOT_APPLICABLE
 
     def test_exception_not_applies_main_pass(self):
         """Exception not applies + main PASS -> PASS."""
@@ -159,7 +158,7 @@ class TestNestedExceptions:
         assert status == EvaluationStatus.PASS
 
     def test_exception_inside_and_applies(self):
-        """AND(exception_rule, other) where exception applies -> FAIL overrides."""
+        """AND(exception_rule, other) where exception applies -> base waived."""
         exc = ExceptionNode(RuleLeaf("MAIN"), RuleLeaf("EXCEPTION"))
         node = ANDNode([exc, RuleLeaf("OTHER")])
         rules = {
@@ -169,7 +168,7 @@ class TestNestedExceptions:
         }
         data = {"age": 30, "is_476": True, "skills": True}
         status, _ = evaluate_expression(node, rules, data)
-        assert status == EvaluationStatus.FAIL
+        assert status == EvaluationStatus.PASS
 
     def test_exception_or_with_not_applicable(self):
         """OR(exception_rule, other) where exception not applies -> PASS via other."""
@@ -209,7 +208,7 @@ class TestRealExceptionCases:
         }
         data = {"age": 30, "visa_subclass": "476"}
         status, _ = evaluate_expression(node, rules, data)
-        assert status == EvaluationStatus.FAIL
+        assert status == EvaluationStatus.NOT_APPLICABLE
 
     def test_age_standard_no_exception(self):
         """Standard age rule, no exception applies."""
@@ -231,7 +230,7 @@ class TestRealExceptionCases:
         }
         data = {"points": 55, "has_regional_nomination": True}
         status, _ = evaluate_expression(node, rules, data)
-        assert status == EvaluationStatus.FAIL
+        assert status == EvaluationStatus.NOT_APPLICABLE
 
     def test_190_with_exception(self):
         """AND(AGE, OR(POINTS, EXCEPTION_RULE)) structure."""
@@ -250,7 +249,7 @@ class TestRealExceptionCases:
         }
         data = {"age": 30, "points": 55, "has_regional_nomination": True}
         status, _ = evaluate_expression(node, rules, data)
-        assert status == EvaluationStatus.FAIL
+        assert status == EvaluationStatus.PASS
 
     def test_exception_with_conditional(self):
         """IF is_476 THEN (exception applies on age)."""

@@ -45,11 +45,14 @@ COPY --chown=app:app schema/ schema/
 COPY --chown=app:app migrations/ migrations/
 COPY --chown=app:app prompts/ prompts/
 COPY --chown=app:app data/gold/requirements_gold.json data/gold/requirements_gold.json
+COPY --chown=app:app data/gold/skilled/skilled_189_real.json data/gold/skilled/skilled_190_real.json data/gold/skilled/
+COPY --chown=app:app data/real_validation/skilled_189_real_chunks.json data/real_validation/skilled_190_real_chunks.json data/real_validation/
 COPY --chown=app:app alembic.ini .
 
 # The raw-snapshot volume is mounted here. Docker seeds a new named volume from
 # this image directory, so its ownership is already app:app on first use.
-RUN mkdir -p /app/raw && chown -R app:app /app/raw
+RUN mkdir -p /app/raw /app/applicant_documents \
+    && chown -R app:app /app/raw /app/applicant_documents
 
 USER app
 

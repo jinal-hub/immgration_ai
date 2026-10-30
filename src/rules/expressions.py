@@ -188,11 +188,10 @@ class ExceptionNode(ExpressionNode):
     """EXCEPTION — rule UNLESS exception.
 
     Semantics:
-        Exception applies AND main PASS  -> FAIL (overridden)
-        Exception applies AND main FAIL  -> FAIL (already failed)
-        Exception applies AND main UNKNOWN -> UNKNOWN
+        Exception applies -> NOT_APPLICABLE (the base rule is waived)
         Exception does NOT apply -> main result unchanged
-        Exception UNKNOWN -> main result unchanged
+        Exception UNKNOWN and main FAIL/UNKNOWN -> UNKNOWN
+        Exception UNKNOWN and main PASS -> PASS
         Exception NOT_APPLICABLE -> main result unchanged
     """
 
@@ -304,14 +303,16 @@ def evaluate_expression(
 
         all_evals = main_evals + exc_evals
 
-        # Exception applies: override PASS -> FAIL
         if exc_status == EvaluationStatus.PASS:
-            if main_status == EvaluationStatus.PASS:
-                return EvaluationStatus.FAIL, all_evals
-            # FAIL stays FAIL, UNKNOWN stays UNKNOWN
-            return main_status, all_evals
+            return EvaluationStatus.NOT_APPLICABLE, all_evals
 
-        # Exception does not apply, UNKNOWN, or NOT_APPLICABLE: main result unchanged
+        if (
+            exc_status == EvaluationStatus.UNKNOWN
+            and main_status in (EvaluationStatus.FAIL, EvaluationStatus.UNKNOWN)
+        ):
+            return EvaluationStatus.UNKNOWN, all_evals
+
+        # A nonmatching or inapplicable exception leaves the base rule unchanged.
         return main_status, all_evals
 
     if isinstance(node, DependencyNode):

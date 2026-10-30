@@ -7,7 +7,7 @@ ROOT = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(ROOT / "src"))
 
 from rules.models import Rule, Provenance, EvaluationStatus
-from rules.rule_engine import evaluate_rule, evaluate_all_rules
+from rules.rule_engine import evaluate_predicate, evaluate_rule, evaluate_all_rules
 
 
 def _make_rule(**overrides):
@@ -107,6 +107,65 @@ def test_unknown_reason():
     rule = _make_rule()
     result = evaluate_rule(rule, {})
     assert "not provided" in result.reason
+
+
+def test_structured_condition_passes_before_base_rule():
+    rule = _make_rule(
+        condition={"field": "visa_subclass", "operator": "EQ", "value": "189"},
+    )
+    assert evaluate_rule(
+        rule, {"age": 30, "visa_subclass": "189"},
+    ).status == EvaluationStatus.PASS
+
+
+def test_structured_condition_not_met_makes_rule_not_applicable():
+    rule = _make_rule(
+        condition={"if": "visa_subclass", "equals": "190"},
+    )
+    assert evaluate_rule(
+        rule, {"age": 50, "visa_subclass": "189"},
+    ).status == EvaluationStatus.NOT_APPLICABLE
+
+
+def test_unknown_condition_does_not_execute_free_text():
+    rule = _make_rule(condition={"description": "unless exceptional circumstances"})
+    assert evaluate_rule(rule, {"age": 30}).status == EvaluationStatus.UNKNOWN
+
+
+def test_predicate_composes_and_or_not_without_eval():
+    data = {"visa_subclass": "189", "age": 30}
+    predicate = {
+        "and": [
+            {"field": "visa_subclass", "operator": "IN", "value": ["189", "190"]},
+            {"not": {"field": "age", "operator": "GTE", "value": 45}},
+        ],
+    }
+    assert evaluate_predicate(predicate, data) == EvaluationStatus.PASS
+
+
+def test_malformed_predicate_is_unknown_not_a_false_legal_finding():
+    assert evaluate_predicate(
+        {"field": "age", "operator": "IN", "value": 45},
+        {"age": 30},
+    ) == EvaluationStatus.UNKNOWN
+    assert evaluate_predicate(
+        {"field": "age", "operator": "EVAL", "value": "anything"},
+        {"age": 30},
+    ) == EvaluationStatus.UNKNOWN
+
+
+def test_exception_waives_failed_base_rule():
+    rule = _make_rule(
+        exception={"field": "visa_subclass", "operator": "EQ", "value": "190"},
+    )
+    result = evaluate_rule(rule, {"age": 50, "visa_subclass": "190"})
+    assert result.status == EvaluationStatus.NOT_APPLICABLE
+
+
+def test_unknown_exception_keeps_failed_base_rule_incomplete():
+    rule = _make_rule(exception={"field": "visa_subclass", "operator": "EQ", "value": "190"})
+    result = evaluate_rule(rule, {"age": 50})
+    assert result.status == EvaluationStatus.UNKNOWN
 
 
 # --- EXISTS / NOT_EXISTS ---

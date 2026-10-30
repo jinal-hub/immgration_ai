@@ -7,6 +7,7 @@ from sqlalchemy.pool import StaticPool
 from fastapi.testclient import TestClient
 
 from db.models import Base
+from db.connection import get_session_factory
 from api.main import app
 
 
@@ -287,7 +288,56 @@ class TestOwnership:
         client.post("/api/v1/applicants", json={"age": 25}, headers=auth_headers)
         resp = client.get("/api/v1/applicants", headers=auth_headers)
         assert resp.status_code == 200
-        assert len(resp.json()) == 2
+        assert len(resp.json()) == 3
+
+    def test_registration_creates_an_owned_applicant_profile(self, client):
+        response = client.post(
+            "/api/v1/auth/register",
+            json={
+                "email": "new-profile@example.com",
+                "password": "password123",
+                "full_name": "Asha Shah",
+            },
+        )
+        assert response.status_code == 201
+        headers = {"Authorization": f"Bearer {response.json()['access_token']}"}
+
+        profiles = client.get("/api/v1/applicants", headers=headers)
+        assert profiles.status_code == 200
+        assert len(profiles.json()) == 1
+        assert profiles.json()[0]["first_name"] == "Asha"
+        assert profiles.json()[0]["last_name"] == "Shah"
+        assert profiles.json()[0]["user_id"] == response.json()["user_id"]
+
+    def test_login_backfills_profile_for_existing_applicant_account(self, client, db_engine):
+        registration = client.post(
+            "/api/v1/auth/register",
+            json={
+                "email": "existing-account@example.com",
+                "password": "password123",
+                "full_name": "Asha Shah",
+            },
+        )
+        user_id = registration.json()["user_id"]
+        with get_session_factory(db_engine)() as session:
+            from db.models import ApplicantProfile
+
+            session.query(ApplicantProfile).filter_by(user_id=user_id).delete()
+            session.commit()
+
+        login = client.post(
+            "/api/v1/auth/login",
+            json={"email": "existing-account@example.com", "password": "password123"},
+        )
+        assert login.status_code == 200
+        profiles = client.get(
+            "/api/v1/applicants",
+            headers={"Authorization": f"Bearer {login.json()['access_token']}"},
+        )
+        assert profiles.status_code == 200
+        assert len(profiles.json()) == 1
+        assert profiles.json()[0]["first_name"] == "Asha"
+        assert profiles.json()[0]["last_name"] == "Shah"
 
     def test_user_cannot_access_another_users_applicant(self, client, auth_headers):
         created = client.post(

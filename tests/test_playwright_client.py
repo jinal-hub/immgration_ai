@@ -48,6 +48,7 @@ class FakePage:
         self.closed = False
         self.selector_waits = []
         self.timeout_ms = None
+        self.content_capture_calls = []
 
     def set_default_timeout(self, ms):
         self.timeout_ms = ms
@@ -67,11 +68,23 @@ class FakePage:
         if self._owner.selector_exc is not None:
             raise self._owner.selector_exc
 
-    def content(self):
-        return self._owner.page_html
+    def locator(self, selector):
+        assert selector == "html"
+        return FakeLocator(self)
 
     def close(self):
         self.closed = True
+
+
+class FakeLocator:
+    def __init__(self, page):
+        self._page = page
+
+    def evaluate(self, expression, arg=None, timeout=None):
+        self._page.content_capture_calls.append((expression, timeout))
+        if self._page._owner.content_exc is not None:
+            raise self._page._owner.content_exc
+        return self._page._owner.page_html
 
 
 class FakeContext:
@@ -79,8 +92,9 @@ class FakeContext:
         def __init__(self, owner):
             self._owner = owner
 
-        def _respond(self, url, headers=None):
+        def _respond(self, url, headers=None, method="get"):
             self._owner.request_calls.append((url, dict(headers or {})))
+            self._owner.request_methods.append((method, url))
             if self._owner.request_exc is not None:
                 raise self._owner.request_exc
             if url.endswith("/robots.txt"):
@@ -98,10 +112,10 @@ class FakeContext:
             )
 
         def get(self, url, headers=None, timeout=None, max_redirects=None):
-            return self._respond(url, headers)
+            return self._respond(url, headers, "get")
 
         def head(self, url, headers=None, timeout=None, max_redirects=None):
-            return self._respond(url, headers)
+            return self._respond(url, headers, "head")
 
     def __init__(self, owner, kwargs):
         self._owner = owner
@@ -149,6 +163,7 @@ class FakePlaywright:
         self.page_html = HTML
         self.goto_exc = None
         self.selector_exc = None
+        self.content_exc = None
         self.request_status = 200
         self.request_headers = {"content-type": "application/pdf"}
         self.request_body = b"%PDF-1.4 " + b"a" * 100
@@ -162,6 +177,7 @@ class FakePlaywright:
         self.launch_calls = []
         self.goto_calls = []
         self.request_calls = []
+        self.request_methods = []
         self.context_kwargs = []
         self.contexts = []
         self.browsers = []
@@ -353,6 +369,25 @@ class TestContentReadyWait:
         assert result.status == FetchStatus.OK
         assert result.selector_timed_out is True
 
+    def test_dom_capture_uses_the_fetch_timeout(self, limiter):
+        fake = FakePlaywright()
+        with _session(fake) as session:
+            result = pw.fetch(URL, timeout=9, session=session, limiter=limiter)
+        assert result.status == FetchStatus.OK
+        page = fake.contexts[0].pages[0]
+        assert page.content_capture_calls == [
+            ("(root) => root.outerHTML", 9000),
+        ]
+
+    def test_dom_capture_timeout_is_reported_as_a_fetch_failure(self, limiter):
+        fake = FakePlaywright(content_exc=TimeoutError("DOM capture timed out"))
+        with _session(fake) as session:
+            result = pw.fetch(URL, session=session, limiter=limiter)
+        assert result.status == FetchStatus.FETCH_FAILED
+        assert result.error_type == "browser_timeout"
+        assert fake.contexts[0].pages[0].closed is True
+        assert fake.contexts[0].closed is True
+
     def test_the_page_is_always_closed(self, limiter):
         fake = FakePlaywright(selector_exc=TimeoutError("x"))
         with _session(fake) as session:
@@ -388,6 +423,9 @@ class TestConditionalGet:
         probe = [c for c in fake.request_calls if not c[0].endswith("robots.txt")][0]
         assert probe[1]["If-None-Match"] == '"v1"'
         assert probe[1]["If-Modified-Since"] == "Wed, 01 Jan 2026 00:00:00 GMT"
+        assert ("get", URL) in fake.request_methods
+        assert not any(method == "head" and target == URL
+                       for method, target in fake.request_methods)
         assert result.not_modified is True
         assert result.raw_bytes is None
         assert result.ok is True

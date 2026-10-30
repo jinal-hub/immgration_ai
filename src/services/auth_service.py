@@ -60,7 +60,11 @@ def _get_jwt_expiration() -> int:
     return int(os.getenv("JWT_EXPIRATION_MINUTES", "1440"))
 
 
-def create_access_token(user_id: str, role: str = "applicant") -> dict:
+def create_access_token(
+    user_id: str,
+    role: str = "applicant",
+    auth_version: int = 0,
+) -> dict:
     """Create JWT access token. Returns dict with token + metadata."""
     secret = _get_jwt_secret()
     algorithm = "HS256"  # Hard-coded, never from env
@@ -72,6 +76,7 @@ def create_access_token(user_id: str, role: str = "applicant") -> dict:
     payload = {
         "sub": user_id,
         "role": role,
+        "ver": auth_version,
         "iat": now,
         "exp": exp,
     }
@@ -116,7 +121,9 @@ class AuthService:
     def register(self, email: str, password: str, full_name: str | None = None) -> dict:
         hashed = hash_password(password)
         user = self._user_repo.create(email=email, password_hash=hashed, full_name=full_name)
-        token_data = create_access_token(str(user.user_id), role=user.role)
+        token_data = create_access_token(
+            str(user.user_id), role=user.role, auth_version=user.auth_version
+        )
         logger.info("User registered", extra={"user_id": str(user.user_id)})
         return {
             "user_id": str(user.user_id),
@@ -131,14 +138,21 @@ class AuthService:
         if not user or not verify_password(password, user.password_hash):
             logger.warning("Login failed", extra={"email": email})
             return None
-        token_data = create_access_token(str(user.user_id), role=user.role)
+        token_data = create_access_token(
+            str(user.user_id), role=user.role, auth_version=user.auth_version
+        )
         logger.info("User logged in", extra={"user_id": str(user.user_id)})
         return {
             "user_id": str(user.user_id),
             "email": user.email,
+            "full_name": user.full_name,
             "role": user.role,
             **token_data,
         }
+
+    def update_password(self, user_id: str, password: str) -> bool:
+        user = self._user_repo.update_password(user_id, hash_password(password))
+        return user is not None
 
     def get_current_user(self, token: str) -> dict | None:
         payload = decode_access_token(token)
@@ -159,7 +173,13 @@ class AuthService:
             logger.warning("JWT sub claim is not a valid UUID", extra={"user_id": user_id})
             return None
         user = self._user_repo.get(user_id)
-        if not user or not user.is_active:
+        token_version = payload.get("ver", 0)
+        if (
+            not isinstance(token_version, int)
+            or not user
+            or not user.is_active
+            or user.auth_version != token_version
+        ):
             return None
         return {
             "user_id": str(user.user_id),

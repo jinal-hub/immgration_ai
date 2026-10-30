@@ -126,6 +126,53 @@ class TestIneligibleScenario:
         assert "POINTS" in outcome.failed_rules
 
 
+class TestOptionalRuleHandling:
+    def test_optional_failure_does_not_make_applicant_ineligible(self):
+        required = _make_rule("REQUIRED", "age", "LT", 45)
+        optional = _make_rule(
+            "OPTIONAL", "points", "GTE", 65, mandatory=False, critical=False,
+        )
+        outcome = assess_eligibility(
+            ANDNode([RuleLeaf("REQUIRED"), RuleLeaf("OPTIONAL")]),
+            {required.rule_id: required, optional.rule_id: optional},
+            ApplicantProfile(
+                visa=VisaSelection(program_id="SKILLED_189"),
+                age=30,
+                points=50,
+            ),
+        )
+        assert outcome.business_status == "ELIGIBLE"
+        assert outcome.failed_rules == ["OPTIONAL"]
+
+    def test_optional_unknown_does_not_make_assessment_incomplete(self):
+        required = _make_rule("REQUIRED", "age", "LT", 45)
+        optional = _make_rule(
+            "OPTIONAL", "points", "GTE", 65, mandatory=False, critical=False,
+        )
+        outcome = assess_eligibility(
+            ANDNode([RuleLeaf("REQUIRED"), RuleLeaf("OPTIONAL")]),
+            {required.rule_id: required, optional.rule_id: optional},
+            ApplicantProfile(
+                visa=VisaSelection(program_id="SKILLED_189"), age=30,
+            ),
+        )
+        assert outcome.business_status == "ELIGIBLE"
+        assert outcome.unknown_rules == ["OPTIONAL"]
+
+    def test_critical_optional_flag_still_gates_eligibility(self):
+        critical = _make_rule(
+            "CRITICAL", "points", "GTE", 65, mandatory=False, critical=True,
+        )
+        outcome = assess_eligibility(
+            RuleLeaf("CRITICAL"),
+            {"CRITICAL": critical},
+            ApplicantProfile(
+                visa=VisaSelection(program_id="SKILLED_189"), points=50,
+            ),
+        )
+        assert outcome.business_status == "INELIGIBLE"
+
+
 # ============================================================
 # INCOMPLETE SCENARIO
 # ============================================================

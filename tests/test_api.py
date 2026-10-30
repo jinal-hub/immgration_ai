@@ -211,6 +211,21 @@ class TestApplicants:
         assert data["english_level"] == "competent"
         assert "applicant_id" in data
 
+    def test_create_applicant_rejects_invalid_age_and_future_birth_date(self, client):
+        headers = self._auth_headers(client)
+        invalid_age = client.post(
+            "/api/v1/applicants",
+            json={"age": 121},
+            headers=headers,
+        )
+        future_birth_date = client.post(
+            "/api/v1/applicants",
+            json={"date_of_birth": "2999-01-01T00:00:00Z"},
+            headers=headers,
+        )
+        assert invalid_age.status_code == 422
+        assert future_birth_date.status_code == 422
+
     def test_list_applicants(self, client):
         headers = self._auth_headers(client)
         client.post("/api/v1/applicants", json={"age": 30}, headers=headers)
@@ -218,7 +233,8 @@ class TestApplicants:
         resp = client.get("/api/v1/applicants", headers=headers)
         assert resp.status_code == 200
         data = resp.json()
-        assert len(data) == 2
+        assert len(data) == 3
+        assert {applicant["age"] for applicant in data} == {None, 25, 30}
 
     def test_get_applicant(self, client):
         headers = self._auth_headers(client)

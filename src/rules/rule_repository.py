@@ -181,6 +181,10 @@ class EnhancedRuleRepo:
             "mandatory": obj.mandatory,
             "critical": obj.critical,
             "message": obj.message,
+            "source_id": obj.source_id,
+            "document_id": obj.document_id,
+            "document_version": obj.document_version,
+            "chunk_id": obj.chunk_id,
             "evidence_text": obj.evidence_text,
         }
         rv = RuleVersion(

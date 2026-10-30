@@ -12,6 +12,9 @@ logger = get_logger(__name__)
 _PROFILE_FIELDS = (
     "first_name",
     "last_name",
+    "date_of_birth",
+    "passport_nationality",
+    "current_visa_subclass",
     "age",
     "english_level",
     "points",

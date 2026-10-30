@@ -132,6 +132,27 @@ class TestUrlValidation:
         with pytest.raises(SourceValidationError):
             validate_http_url("https://example.gov.au/x")
 
+    @pytest.mark.parametrize(
+        "url",
+        [
+            "https://www.vetassess.com.au/",
+            "https://www.acs.org.au/",
+            "https://www.engineersaustralia.org.au/",
+            "https://www.anmac.org.au/",
+            "https://www.aitsl.edu.au/",
+            "https://www.cpaaustralia.com.au/",
+            "https://www.publicaccountants.org.au/",
+            "https://www.aim.com.au/",
+            "https://theterritory.com.au/migrate",
+        ],
+    )
+    def test_documented_designated_authorities_are_allowed(self, url):
+        assert validate_http_url(url).startswith("https://")
+
+    def test_unlisted_com_au_hosts_are_not_allowed(self):
+        with pytest.raises(SourceValidationError):
+            validate_http_url("https://unlisted.example.com.au/")
+
 
 class TestDestinationResolution:
     def test_public_address_is_allowed(self, monkeypatch):
@@ -183,4 +204,3 @@ class TestDestinationResolution:
         ) == "https://example.gov.au/b"
         with pytest.raises(SourceValidationError):
             resolve_redirect("https://example.gov.au/a", "http://127.0.0.1/secret")
-

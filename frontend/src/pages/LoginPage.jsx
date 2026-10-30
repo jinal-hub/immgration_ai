@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { useLocation, useNavigate } from "react-router-dom";
+import { Link, useLocation, useNavigate } from "react-router-dom";
 import { useAuth } from "../auth/AuthContext.jsx";
 
 export default function LoginPage() {
@@ -57,6 +57,9 @@ export default function LoginPage() {
         <button className="btn btn-primary" type="submit" disabled={busy}>
           {busy ? "Signing in…" : "Sign in"}
         </button>
+        <p className="muted" style={{ textAlign: "center", marginTop: "var(--space-2)" }}>
+          Looking to check a visa pathway? <Link to="/portal/login">Applicant sign in</Link>
+        </p>
       </form>
     </div>
   );

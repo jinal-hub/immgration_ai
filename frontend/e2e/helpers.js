@@ -39,6 +39,7 @@ export const DEFAULTS = {
     next_run_at: "2026-10-11T03:00:00Z",
   },
   "GET /api/v1/admin/rules": [],
+  "GET /api/v1/admin/rules/gold-examples": { items: [], warning: "" },
   "GET /api/v1/admin/documents": [],
 };
 
@@ -88,6 +89,24 @@ export async function mockApi(page, overrides = {}) {
 export async function openPage(page, path, overrides) {
   await signIn(page);
   await mockApi(page, overrides);
+  await page.goto(path);
+  await expect(page.getByRole("heading", { level: 1 })).toBeVisible();
+}
+
+export async function openApplicantPage(page, path, overrides = {}) {
+  await page.addInitScript(() => {
+    sessionStorage.setItem("ik_applicant_token", "e2e-applicant-placeholder-token");
+  });
+  await mockApi(page, {
+    ...DEFAULTS,
+    "GET /api/v1/auth/me": {
+      user_id: "applicant-user-1",
+      email: "applicant@example.test",
+      full_name: "Alex Applicant",
+      role: "applicant",
+    },
+    ...overrides,
+  });
   await page.goto(path);
   await expect(page.getByRole("heading", { level: 1 })).toBeVisible();
 }

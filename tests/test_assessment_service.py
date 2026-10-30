@@ -15,6 +15,7 @@ Verifies all fixes:
 from __future__ import annotations
 
 import json
+from datetime import datetime, timedelta, timezone
 
 import pytest
 from sqlalchemy import create_engine
@@ -334,6 +335,27 @@ class TestFullPipeline:
         assert data["age"] == 30
         assert "english_level" not in data
         assert "points" not in data
+
+    def test_date_of_birth_overrides_stale_stored_age(self, session, create_applicant):
+        today = datetime.now(timezone.utc).date()
+        birth_date = today.replace(year=today.year - 30, month=1, day=1)
+        applicant = create_applicant(
+            age=18,
+            date_of_birth=datetime.combine(
+                birth_date, datetime.min.time(), tzinfo=timezone.utc,
+            ),
+        )
+        data = _build_profile_data(applicant)
+        expected_age = today.year - birth_date.year - (
+            (today.month, today.day) < (birth_date.month, birth_date.day)
+        )
+        assert data["age"] == expected_age
+
+    def test_future_date_of_birth_is_rejected(self, session, create_applicant):
+        future = datetime.now(timezone.utc) + timedelta(days=365)
+        applicant = create_applicant(date_of_birth=future)
+        with pytest.raises(ValueError, match="cannot be in the future"):
+            _build_profile_data(applicant)
 
     def test_error_handling_applicant_not_found(self, session, seed_rules):
         """run_assessment raises ValueError for nonexistent applicant."""

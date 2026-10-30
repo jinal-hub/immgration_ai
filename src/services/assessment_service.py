@@ -30,7 +30,12 @@ from assessment.applicant import ApplicantProfile as Phase3CProfile, VisaSelecti
 from assessment.assessment import assess_eligibility as _assess, EligibilityOutcome
 from assessment.gap_engine import GapEngine, Gap
 from rules.rule_repository import EnhancedRuleRepo, orm_to_dataclass
-from db.models import RuleVersion
+from db.models import (
+    GovernmentSource,
+    ImmigrationProgram,
+    Rule as RuleORM,
+    RuleVersion,
+)
 from logging_config import get_logger
 from sqlalchemy import select
 
@@ -74,6 +79,9 @@ class AssessmentService:
         # 4. Build applicant profile for Phase 3C
         visa = VisaSelection(program_id=program_id)
         profile_data = _build_profile_data(applicant_orm)
+        program = self._repo._s.get(ImmigrationProgram, program_id)
+        if program and not profile_data.get("visa_subclass") and program.subclass_code:
+            profile_data["visa_subclass"] = program.subclass_code
         applicant = Phase3CProfile.from_dict({"visa": visa.to_dict(), **profile_data})
 
         # 5. Run Phase 3C assessment
@@ -94,6 +102,8 @@ class AssessmentService:
         """Run a full eligibility assessment and persist the result."""
         # Capture applicant snapshot before evaluation (frozen profile at assessment time)
         applicant_orm = self._applicant_repo.get(applicant_id)
+        if applicant_orm is None:
+            raise ValueError(f"Applicant {applicant_id} not found")
         applicant_snapshot = _build_profile_data(applicant_orm)
 
         applicant, active_rules, outcome = self._evaluate(applicant_id, program_id)
@@ -272,6 +282,49 @@ class AssessmentService:
             return None
         results = self._result_repo.list_for_assessment(assessment_id)
         gaps = self._gap_repo.list_for_assessment(assessment_id)
+        rule_ids = {result.rule_id for result in results}
+        rules_by_id = {
+            rule.rule_id: rule
+            for rule in self._repo._s.execute(
+                select(RuleORM).where(RuleORM.rule_id.in_(rule_ids))
+            ).scalars()
+        } if rule_ids else {}
+        version_ids = {
+            result.rule_version_id
+            for result in results
+            if result.rule_version_id is not None
+        }
+        versions_by_id = {
+            version.version_id: version
+            for version in self._repo._s.execute(
+                select(RuleVersion).where(RuleVersion.version_id.in_(version_ids))
+            ).scalars()
+        } if version_ids else {}
+        source_ids = set()
+        source_id_by_result = {}
+        evidence_by_result = {}
+        for result in results:
+            rule = rules_by_id.get(result.rule_id)
+            version = versions_by_id.get(result.rule_version_id)
+            snapshot = version.snapshot_json if version else {}
+            source_id = (
+                snapshot.get("source_id") if isinstance(snapshot, dict) else None
+            ) or (rule.source_id if rule else None)
+            evidence_text = (
+                snapshot.get("evidence_text") if isinstance(snapshot, dict) else None
+            ) or (rule.evidence_text if rule else None)
+            source_id_by_result[result.result_id] = source_id
+            evidence_by_result[result.result_id] = evidence_text
+            if source_id:
+                source_ids.add(source_id)
+        sources_by_id = {
+            source.source_id: source
+            for source in self._repo._s.execute(
+                select(GovernmentSource).where(
+                    GovernmentSource.source_id.in_(source_ids)
+                )
+            ).scalars()
+        } if source_ids else {}
         return {
             "assessment_id": assessment.assessment_id,
             "applicant_id": assessment.applicant_id,
@@ -300,6 +353,33 @@ class AssessmentService:
                     "operator": r.operator,
                     "message": r.message,
                     "reason": r.reason,
+                    "evidence_text": evidence_by_result.get(r.result_id),
+                    "source_id": source_id_by_result.get(r.result_id),
+                    "source_url": (
+                        sources_by_id[source_id_by_result[r.result_id]].url
+                        if source_id_by_result.get(r.result_id) in sources_by_id
+                        else None
+                    ),
+                    "source_authority": (
+                        sources_by_id[source_id_by_result[r.result_id]].authority
+                        if source_id_by_result.get(r.result_id) in sources_by_id
+                        else None
+                    ),
+                    "source_status": (
+                        sources_by_id[source_id_by_result[r.result_id]].status
+                        if source_id_by_result.get(r.result_id) in sources_by_id
+                        else None
+                    ),
+                    "source_fetch_status": (
+                        sources_by_id[source_id_by_result[r.result_id]].fetch_status
+                        if source_id_by_result.get(r.result_id) in sources_by_id
+                        else None
+                    ),
+                    "source_last_checked_at": (
+                        sources_by_id[source_id_by_result[r.result_id]].last_checked_at
+                        if source_id_by_result.get(r.result_id) in sources_by_id
+                        else None
+                    ),
                 }
                 for r in results
             ],
@@ -310,6 +390,9 @@ class AssessmentService:
                     "priority": g.priority,
                     "message": g.message,
                     "rule_id": g.rule_id,
+                    "evidence_text": g.evidence_text,
+                    "answer": json.loads(g.answer) if g.answer is not None else None,
+                    "source_chunk_ids": g.source_chunk_ids or [],
                 }
                 for g in gaps
             ],
@@ -340,6 +423,8 @@ class AssessmentService:
 # ------------------------------------------------------------------
 def _build_profile_data(applicant_orm) -> dict:
     """Convert DB ApplicantProfile ORM into a dict for Phase 3C ApplicantProfile."""
+    if applicant_orm is None:
+        raise ValueError("Applicant not found")
     data = {}
     for field_name in (
         "age", "english_level", "points", "occupation",
@@ -352,6 +437,25 @@ def _build_profile_data(applicant_orm) -> dict:
         val = getattr(applicant_orm, field_name, None)
         if val is not None:
             data[field_name] = val
+    if applicant_orm.date_of_birth:
+        date_of_birth = applicant_orm.date_of_birth
+        birth_date = (
+            date_of_birth.date()
+            if isinstance(date_of_birth, datetime)
+            else date_of_birth
+        )
+        today = datetime.now(timezone.utc).date()
+        if birth_date > today:
+            raise ValueError("Applicant date_of_birth cannot be in the future")
+        age = today.year - birth_date.year - (
+            (today.month, today.day) < (birth_date.month, birth_date.day)
+        )
+        if 0 <= age <= 120:
+            data["age"] = age
+        else:
+            data.pop("age", None)
+    elif "age" in data and not 0 <= data["age"] <= 120:
+        data.pop("age", None)
     return data
 
 

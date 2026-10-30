@@ -56,8 +56,16 @@ def applicant_user(client):
     headers = _register_and_login(client, "owner1@test.com")
     resp = client.post(
         "/api/v1/applicants",
-        json={"first_name": "Jane", "last_name": "Doe", "age": 29,
-              "english_level": "COMPETENT", "points": 65},
+        json={
+            "first_name": "Jane",
+            "last_name": "Doe",
+            "date_of_birth": "1997-04-03T00:00:00Z",
+            "passport_nationality": "NZL",
+            "current_visa_subclass": "500",
+            "age": 29,
+            "english_level": "COMPETENT",
+            "points": 65,
+        },
         headers=headers,
     )
     assert resp.status_code == 201
@@ -73,6 +81,8 @@ class TestListApplicants:
         match = next(a for a in body["applicants"] if a["applicant_id"] == applicant_user["applicant"]["applicant_id"])
         assert match["owner_email"] == applicant_user["email"]
         assert match["first_name"] == "Jane"
+        assert match["profile_exists"] is True
+        assert match["passport_nationality"] == "NZL"
 
     def test_pagination_fields_present(self, client, admin_headers):
         resp = client.get("/api/v1/admin/applicants?limit=5&offset=0", headers=admin_headers)
@@ -99,7 +109,36 @@ class TestGetApplicantDetail:
         body = resp.json()
         assert body["applicant_id"] == applicant_id
         assert body["owner_email"] == applicant_user["email"]
+        assert body["date_of_birth"].startswith("1997-04-03")
+        assert body["current_visa_subclass"] == "500"
         assert body["assessments"] == []  # none created in this test
+
+    def test_admin_can_view_account_before_profile_is_submitted(
+        self, client, admin_headers
+    ):
+        applicant_headers = _register_and_login(client, "unfinished@test.com")
+        user = client.get("/api/v1/auth/me", headers=applicant_headers).json()
+        with get_session_factory(client.app.state.db_engine)() as session:
+            from db.models import ApplicantProfile
+
+            session.query(ApplicantProfile).filter_by(user_id=user["user_id"]).delete()
+            session.commit()
+
+        response = client.get("/api/v1/admin/applicants", headers=admin_headers)
+        assert response.status_code == 200
+        account = next(
+            row for row in response.json()["applicants"]
+            if row["user_id"] == user["user_id"]
+        )
+        assert account["profile_exists"] is False
+        assert account["applicant_id"] == user["user_id"]
+        detail = client.get(
+            f"/api/v1/admin/applicants/{user['user_id']}",
+            headers=admin_headers,
+        )
+        assert detail.status_code == 200
+        assert detail.json()["profile_exists"] is False
+        assert detail.json()["assessments"] == []
 
     def test_unknown_applicant_returns_404(self, client, admin_headers):
         resp = client.get(
@@ -128,7 +167,10 @@ class TestExistingOwnerScopingIsUntouched:
         other_headers = _register_and_login(client, "owner2@test.com")
         resp = client.get("/api/v1/applicants", headers=other_headers)
         assert resp.status_code == 200
-        assert resp.json() == []  # owner2 has no applicants of their own
+        assert len(resp.json()) == 1
+        assert resp.json()[0]["user_id"] == client.get(
+            "/api/v1/auth/me", headers=other_headers
+        ).json()["user_id"]
 
     def test_owner_scoped_get_by_id_still_403s_for_non_owner(self, client, applicant_user):
         applicant_id = applicant_user["applicant"]["applicant_id"]

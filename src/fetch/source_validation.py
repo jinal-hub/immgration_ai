@@ -11,7 +11,9 @@ Two layers, deliberately separate:
   where DNS rebinding and redirect-based SSRF actually matter.
 
 The default suffix list is ``.gov.au`` because this product only covers
-Australian visas. A deployment can extend it with a comma-separated
+Australian visas. Exact hosts for designated Australian assessment and
+government migration authorities are also allowed; arbitrary commercial
+domains are not. A deployment can extend the suffix list with a comma-separated
 ``SOURCE_ALLOWED_HOST_SUFFIXES`` value (for example ``.gov.au,.govt.nz``); it
 cannot disable the public-address check.
 """
@@ -27,6 +29,25 @@ from urllib.parse import unquote, urljoin, urlparse
 from urllib.parse import urlsplit, urlunsplit
 
 DEFAULT_ALLOWED_SUFFIXES = (".gov.au",)
+APPROVED_DESIGNATED_AUTHORITY_HOSTS = frozenset({
+    "theterritory.com.au",
+    "www.vetassess.com.au",
+    "vetassess.com.au",
+    "www.acs.org.au",
+    "acs.org.au",
+    "www.engineersaustralia.org.au",
+    "engineersaustralia.org.au",
+    "www.anmac.org.au",
+    "anmac.org.au",
+    "www.aitsl.edu.au",
+    "aitsl.edu.au",
+    "www.cpaaustralia.com.au",
+    "cpaaustralia.com.au",
+    "www.publicaccountants.org.au",
+    "publicaccountants.org.au",
+    "www.aim.com.au",
+    "aim.com.au",
+})
 
 
 def allowed_suffixes() -> tuple[str, ...]:
@@ -182,10 +203,12 @@ def validate_http_url(value: str | None, *, resolve: bool = False) -> str:
     suffixes = allowed_suffixes()
     if "*" in suffixes or "any" in suffixes:
         pass
-    elif not any(host == suffix.lstrip(".") or host.endswith(suffix) for suffix in suffixes):
+    elif (
+        host not in APPROVED_DESIGNATED_AUTHORITY_HOSTS
+        and not any(host == suffix.lstrip(".") or host.endswith(suffix) for suffix in suffixes)
+    ):
         _fail(
-            "url host is not on the official government allowlist "
-            f"({', '.join(suffixes)})",
+            "url host is not on the official government or designated-authority allowlist",
             "url",
         )
 

@@ -138,13 +138,22 @@ class TestIdempotency:
 
         result1 = seed_registry._seed_database(require_postgres=False)
         result2 = seed_registry._seed_database(require_postgres=False)
-        assert result1 == {"countries": 1, "programs": 7, "sources": 14}
+        seed = seed_registry.load_seed()
+        expected = {
+            "countries": len(seed["countries"]),
+            "programs": len(seed["immigration_programs"]),
+            "sources": len(seed["government_sources"]),
+        }
+        assert result1 == expected
         assert result2 == result1
 
         import sqlite3
         raw = sqlite3.connect(str(tmp_db))
-        for table, expect in [("countries", 1), ("immigration_programs", 7),
-                              ("government_sources", 14)]:
+        for table, expect in [
+            ("countries", expected["countries"]),
+            ("immigration_programs", expected["programs"]),
+            ("government_sources", expected["sources"]),
+        ]:
             n = raw.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
             assert n == expect, f"{table}: expected {expect}, got {n}"
         raw.close()
@@ -161,11 +170,12 @@ class TestPostgresSeedCounts:
         from sqlalchemy import create_engine
 
         seed_registry._seed_database(require_postgres=True)
+        seed = seed_registry.load_seed()
         engine = create_engine(get_database_url())
         with engine.connect() as conn:
-            assert conn.execute(text("SELECT COUNT(*) FROM countries")).scalar() == 1
-            assert conn.execute(text("SELECT COUNT(*) FROM immigration_programs")).scalar() == 7
-            assert conn.execute(text("SELECT COUNT(*) FROM government_sources")).scalar() == 14
+            assert conn.execute(text("SELECT COUNT(*) FROM countries")).scalar() == len(seed["countries"])
+            assert conn.execute(text("SELECT COUNT(*) FROM immigration_programs")).scalar() == len(seed["immigration_programs"])
+            assert conn.execute(text("SELECT COUNT(*) FROM government_sources")).scalar() == len(seed["government_sources"])
         engine.dispose()
 
     def test_seed_idempotent_on_postgres(self):
@@ -176,11 +186,11 @@ class TestPostgresSeedCounts:
         # Two more runs must not grow the row counts.
         seed_registry._seed_database(require_postgres=True)
         seed_registry._seed_database(require_postgres=True)
+        seed = seed_registry.load_seed()
         engine = create_engine(get_database_url())
         with engine.connect() as conn:
-            assert conn.execute(text("SELECT COUNT(*) FROM countries")).scalar() == 1
-            assert conn.execute(text("SELECT COUNT(*) FROM immigration_programs")).scalar() == 7
-            assert conn.execute(text("SELECT COUNT(*) FROM government_sources")).scalar() == 14
+            assert conn.execute(text("SELECT COUNT(*) FROM countries")).scalar() == len(seed["countries"])
+            assert conn.execute(text("SELECT COUNT(*) FROM immigration_programs")).scalar() == len(seed["immigration_programs"])
+            assert conn.execute(text("SELECT COUNT(*) FROM government_sources")).scalar() == len(seed["government_sources"])
         engine.dispose()
-
 

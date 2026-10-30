@@ -143,6 +143,24 @@ describe("Sources table shows a host's refusal cooldown", () => {
     expect(screen.getByText("Not checked (host paused)")).toBeInTheDocument();
     expect(screen.getByText("Skipped (host paused)")).toBeInTheDocument();
   });
+
+  it("filters sources by visa category and program", async () => {
+    const user = userEvent.setup();
+    const skilled = source({ source_id: "SRC-SKILLED", program_id: "SKILLED_189" });
+    const student = source({
+      source_id: "SRC-STUDENT",
+      program_id: "STUDENT_500",
+      visa_category: "STUDENT",
+    });
+    await renderWith([skilled, student]);
+
+    await user.selectOptions(screen.getByLabelText("Visa category"), "STUDENT");
+    expect(screen.getByText("SRC-STUDENT")).toBeInTheDocument();
+    expect(screen.queryByText("SRC-SKILLED")).not.toBeInTheDocument();
+
+    await user.selectOptions(screen.getByLabelText("Visa program"), "STUDENT_500");
+    expect(screen.getByText("SRC-STUDENT")).toBeInTheDocument();
+  });
 });
 
 describe("409 responses tell busy and refused apart", () => {

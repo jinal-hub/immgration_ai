@@ -20,6 +20,14 @@ data/*
 !data/gold/
 data/gold/*
 !data/gold/requirements_gold.json
+!data/gold/skilled/
+data/gold/skilled/*
+!data/gold/skilled/skilled_189_real.json
+!data/gold/skilled/skilled_190_real.json
+!data/real_validation/
+data/real_validation/*
+!data/real_validation/skilled_189_real_chunks.json
+!data/real_validation/skilled_190_real_chunks.json
 extracted/
 raw/
 validation/

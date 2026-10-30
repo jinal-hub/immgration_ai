@@ -28,6 +28,7 @@ Usage in FastAPI lifespan:
 """
 from __future__ import annotations
 
+import inspect
 import os
 import threading
 import uuid
@@ -170,7 +171,30 @@ def _source_fetch_snapshot(session, source_id: str) -> dict[str, Any]:
     }
 
 
-def _run_sync_job(run_id: str, engine, trigger_type: str) -> None:
+def _sync_all_with_job(session, trigger_type: str, sync_job_id: str | None):
+    """Call sync_all_sources with a durable job id when it supports one.
+
+    Tests (and any older out-of-tree caller) monkeypatch sync_all_sources with a
+    function that has the original three-argument signature. Passing the new
+    keyword blindly would break them, so only pass it when the callable really
+    accepts it. The production implementation does, which is what makes the
+    in-memory run_id and the durable SyncJob the same id.
+    """
+    from orchestration.government_sync import sync_all_sources
+
+    kwargs: dict[str, Any] = {}
+    try:
+        if "sync_job_id" in inspect.signature(sync_all_sources).parameters:
+            kwargs["sync_job_id"] = sync_job_id
+    except (TypeError, ValueError):
+        pass
+    return sync_all_sources(
+        session, dry_run=False, trigger_type=trigger_type, **kwargs,
+    )
+
+
+def _run_sync_job(run_id: str, engine, trigger_type: str,
+                  sync_job_id: str | None = None) -> None:
     """Background-thread body: run the sync, record progress, release the lock.
 
     Mirrors trigger_sync_now's sync_all_sources call exactly — the only
@@ -179,7 +203,6 @@ def _run_sync_job(run_id: str, engine, trigger_type: str) -> None:
     at the end of the actual work, not when the HTTP request returns.
     """
     from db.connection import get_session
-    from orchestration.government_sync import sync_all_sources
 
     _set_job(run_id, status="RUNNING", started_at=datetime.now(_tz.utc).isoformat())
 
@@ -187,13 +210,14 @@ def _run_sync_job(run_id: str, engine, trigger_type: str) -> None:
     error: str | None = None
     try:
         with get_session(engine) as session:
-            results = sync_all_sources(session, dry_run=False, trigger_type=trigger_type)
+            results = _sync_all_with_job(session, trigger_type, sync_job_id or run_id)
             summary = {
                 "total_sources": len(results),
                 "changed": sum(1 for r in results if r.status == "changed"),
                 "unchanged": sum(1 for r in results if r.status == "unchanged"),
                 "errors": sum(1 for r in results if r.status == "error"),
                 "cooldowns": sum(1 for r in results if r.status == "cooldown"),
+                "sync_job_id": sync_job_id or run_id,
                 "results": [
                     {
                         "source_id": r.source_id,
@@ -224,6 +248,7 @@ def _run_sync_job(run_id: str, engine, trigger_type: str) -> None:
         if error is None and summary is not None:
             _set_job(
                 run_id, status="COMPLETED", result=summary,
+                sync_job_id=sync_job_id or run_id,
                 completed_at=datetime.now(_tz.utc).isoformat(),
             )
             logger.info(
@@ -368,12 +393,42 @@ def start_sync_background(engine, trigger_type: str = "MANUAL") -> dict[str, Any
         started_at=None, completed_at=None, result=None, error=None,
     )
     thread = threading.Thread(
-        target=_run_sync_job, args=(run_id, engine, trigger_type),
+        target=_run_sync_job, args=(run_id, engine, trigger_type, run_id),
         name=f"sync-job-{run_id}", daemon=True,
     )
     thread.start()
     logger.info("Background sync started", extra={"run_id": run_id, "trigger_type": trigger_type})
     return {"run_id": run_id, "status": "STARTED"}
+
+
+def start_resume_sync_background(engine, sync_job_id: str) -> dict[str, Any]:
+    """Resume an existing durable SyncJob in a background thread.
+
+    The job id is reused as the in-memory run id, so GET /admin/runs/{id}
+    returns live progress both during this process and (via the DB fallback)
+    after a restart. Sources already CHANGED/UNCHANGED are not fetched again;
+    everything else (pending, interrupted, failed, cooldown-skipped) is retried.
+    """
+    if not _acquired_sync_lock():
+        logger.warning(
+            "Background sync resume rejected - another sync is already running",
+            extra={"sync_job_id": sync_job_id},
+        )
+        return {"status": "busy", "detail": "A sync is already in progress"}
+
+    _set_job(
+        sync_job_id,
+        status="STARTED", trigger_type="MANUAL", sync_job_id=sync_job_id,
+        started_at=None, completed_at=None, result=None, error=None,
+    )
+    thread = threading.Thread(
+        target=_run_sync_job,
+        args=(sync_job_id, engine, "MANUAL", sync_job_id),
+        name=f"sync-resume-{sync_job_id}", daemon=True,
+    )
+    thread.start()
+    logger.info("Background sync resume started", extra={"sync_job_id": sync_job_id})
+    return {"run_id": sync_job_id, "status": "STARTED", "resumed": True}
 
 
 def _sync_job(engine) -> None:
@@ -383,7 +438,6 @@ def _sync_job(engine) -> None:
     Protected by _sync_lock to prevent overlap with other sync executions.
     """
     from db.connection import get_session
-    from orchestration.government_sync import sync_all_sources
 
     if not _acquired_sync_lock():
         logger.warning("Scheduler: sync skipped — another sync is already running")
@@ -392,7 +446,7 @@ def _sync_job(engine) -> None:
     try:
         logger.info("Scheduler: starting government source sync")
         with get_session(engine) as session:
-            results = sync_all_sources(session, dry_run=False, trigger_type="SCHEDULED")
+            results = _sync_all_with_job(session, "SCHEDULED", str(uuid.uuid4()))
             changed = sum(1 for r in results if r.status == "changed")
             errors = sum(1 for r in results if r.status == "error")
             unchanged = sum(1 for r in results if r.status == "unchanged")
@@ -529,7 +583,6 @@ def trigger_sync_now(engine) -> dict[str, Any]:
     If a sync is already in progress, returns status='busy'.
     """
     from db.connection import get_session
-    from orchestration.government_sync import sync_all_sources
 
     if not _acquired_sync_lock():
         logger.warning("Manual sync rejected — another sync is already running")
@@ -537,9 +590,11 @@ def trigger_sync_now(engine) -> dict[str, Any]:
 
     try:
         logger.info("Manual sync triggered")
+        sync_job_id = str(uuid.uuid4())
         with get_session(engine) as session:
-            results = sync_all_sources(session, dry_run=False, trigger_type="MANUAL")
+            results = _sync_all_with_job(session, "MANUAL", sync_job_id)
             return {
+                "sync_job_id": sync_job_id,
                 "total_sources": len(results),
                 "changed": sum(1 for r in results if r.status == "changed"),
                 "unchanged": sum(1 for r in results if r.status == "unchanged"),

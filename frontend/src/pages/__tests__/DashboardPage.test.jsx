@@ -144,7 +144,7 @@ describe("DashboardPage", () => {
     api.listRules.mockResolvedValue([{
       rule_id: "RULE-GOLD-REAL-189-AGE-001",
       program_id: "SKILLED_189",
-      status: "DRAFT",
+      status: "APPROVED",
       evaluable: true,
     }]);
     api.getScheduler.mockResolvedValue(SAMPLE_SCHEDULER);

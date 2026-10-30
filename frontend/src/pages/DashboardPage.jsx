@@ -22,6 +22,7 @@ const GOLD_PROGRAMS = [
   { id: "VISITOR_600", name: "Visitor visa (subclass 600)" },
   { id: "WORK_482", name: "Work visa (subclass 482)" },
 ];
+const REVIEWABLE_GOLD_STATUSES = new Set(["DRAFT", "VALIDATED", "APPROVED"]);
 
 function summarizeSources(sources) {
   let healthy = 0;
@@ -243,7 +244,7 @@ export default function DashboardPage() {
                     <div className="card-header">
                       <strong>{rule.rule_id}</strong>
                       <StatusBadge value={rule.status} />
-                      {rule.status === "DRAFT" && (
+                      {REVIEWABLE_GOLD_STATUSES.has(rule.status) && (
                         <div className="flex">
                           <button
                             className="btn btn-sm btn-primary"

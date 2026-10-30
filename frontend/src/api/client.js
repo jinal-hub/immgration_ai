@@ -2,35 +2,41 @@
 // normalizes errors, and treats ANY 401 as "log out now" - there is no
 // refresh endpoint, so a 401 can only mean the session is no longer valid.
 const API_BASE = import.meta.env.VITE_API_BASE_URL || "http://localhost:8000";
-const TOKEN_KEY = "ik_admin_token";
+const TOKEN_KEYS = {
+  admin: "ik_admin_token",
+  applicant: "ik_applicant_token",
+};
 
-let unauthorizedHandler = null;
+const unauthorizedHandlers = {
+  admin: null,
+  applicant: null,
+};
 
 // Registered once by AuthContext on mount. Kept outside React so every
 // request (even ones fired from outside a component) can trigger logout.
-export function setUnauthorizedHandler(fn) {
-  unauthorizedHandler = fn;
+export function setUnauthorizedHandler(fn, tokenContext = "admin") {
+  unauthorizedHandlers[tokenContext] = fn;
 }
 
-export function getToken() {
+export function getToken(tokenContext = "admin") {
   try {
-    return sessionStorage.getItem(TOKEN_KEY);
+    return sessionStorage.getItem(TOKEN_KEYS[tokenContext]);
   } catch {
     return null;
   }
 }
 
-export function setToken(token) {
+export function setToken(token, tokenContext = "admin") {
   try {
-    sessionStorage.setItem(TOKEN_KEY, token);
+    sessionStorage.setItem(TOKEN_KEYS[tokenContext], token);
   } catch {
     /* sessionStorage unavailable (private mode, etc.) - session just won't persist */
   }
 }
 
-export function clearToken() {
+export function clearToken(tokenContext = "admin") {
   try {
-    sessionStorage.removeItem(TOKEN_KEY);
+    sessionStorage.removeItem(TOKEN_KEYS[tokenContext]);
   } catch {
     /* ignore */
   }
@@ -52,11 +58,26 @@ function toQuery(params) {
   return "?" + new URLSearchParams(entries).toString();
 }
 
-async function request(path, { method = "GET", body, auth = true, query } = {}) {
+async function request(
+  path,
+  {
+    method = "GET",
+    body,
+    rawBody,
+    rawContentType,
+    responseType,
+    auth = true,
+    query,
+    tokenContext = "admin",
+  } = {}
+) {
   const headers = {};
   if (body !== undefined) headers["Content-Type"] = "application/json";
+  if (rawBody !== undefined && rawContentType) {
+    headers["Content-Type"] = rawContentType;
+  }
   if (auth) {
-    const token = getToken();
+    const token = getToken(tokenContext);
     if (token) headers.Authorization = `Bearer ${token}`;
   }
 
@@ -65,11 +86,13 @@ async function request(path, { method = "GET", body, auth = true, query } = {}) 
     res = await fetch(`${API_BASE}${path}${toQuery(query)}`, {
       method,
       headers,
-      body: body !== undefined ? JSON.stringify(body) : undefined,
+      body: body !== undefined ? JSON.stringify(body) : rawBody,
     });
   } catch {
     throw new ApiError("Could not reach the server. Check your connection and try again.", 0, null);
   }
+
+  if (res.ok && responseType === "blob") return res.blob();
 
   let data = null;
   const text = await res.text();
@@ -82,8 +105,8 @@ async function request(path, { method = "GET", body, auth = true, query } = {}) 
   }
 
   if (!res.ok) {
-    if (res.status === 401 && auth && unauthorizedHandler) {
-      unauthorizedHandler();
+    if (res.status === 401 && auth && unauthorizedHandlers[tokenContext]) {
+      unauthorizedHandlers[tokenContext]();
     }
     const detail =
       (data && typeof data === "object" && (data.detail || data.message)) ||
@@ -102,8 +125,40 @@ export function login(email, password) {
   return request("/api/v1/auth/login", { method: "POST", body: { email, password }, auth: false });
 }
 
-export function getMe() {
-  return request("/api/v1/auth/me");
+export function loginApplicant(email, password) {
+  return request("/api/v1/auth/login", {
+    method: "POST",
+    body: { email, password },
+    auth: false,
+  });
+}
+
+export function registerApplicant(email, password, fullName) {
+  return request("/api/v1/auth/register", {
+    method: "POST",
+    body: { email, password, full_name: fullName },
+    auth: false,
+  });
+}
+
+export function requestApplicantPasswordReset(email) {
+  return request("/api/v1/auth/password-reset/request", {
+    method: "POST",
+    body: { email },
+    auth: false,
+  });
+}
+
+export function confirmApplicantPasswordReset(token, password) {
+  return request("/api/v1/auth/password-reset/confirm", {
+    method: "POST",
+    body: { token, password },
+    auth: false,
+  });
+}
+
+export function getMe(tokenContext = "admin") {
+  return request("/api/v1/auth/me", { tokenContext });
 }
 
 // ---------------------------------------------------------------------------
@@ -282,7 +337,7 @@ export function searchDocuments({ query, programId, documentId, mode, limit } = 
 }
 
 // ---------------------------------------------------------------------------
-// Applicants (read-only)
+// Admin applicant views
 // ---------------------------------------------------------------------------
 export function listApplicants({ limit = 50, offset = 0 } = {}) {
   return request("/api/v1/admin/applicants", { query: { limit, offset } });
@@ -290,6 +345,324 @@ export function listApplicants({ limit = 50, offset = 0 } = {}) {
 
 export function getApplicant(applicantId) {
   return request(`/api/v1/admin/applicants/${encodeURIComponent(applicantId)}`);
+}
+
+// ---------------------------------------------------------------------------
+// Applicant self-service
+// ---------------------------------------------------------------------------
+export function listApplicantPrograms() {
+  return request("/api/v1/applicants/programs", { tokenContext: "applicant" });
+}
+
+export function listApplicantProfiles() {
+  return request("/api/v1/applicants", { tokenContext: "applicant" });
+}
+
+export function listApplicantVisaSelections(applicantId) {
+  return request(
+    `/api/v1/applicants/${encodeURIComponent(applicantId)}/visa-selections`,
+    { tokenContext: "applicant" }
+  );
+}
+
+export function saveApplicantVisaSelection(applicantId, programId) {
+  return request(
+    `/api/v1/applicants/${encodeURIComponent(applicantId)}/visa-selections`,
+    {
+      method: "POST",
+      body: { program_id: programId },
+      tokenContext: "applicant",
+    }
+  );
+}
+
+export function listApplicantCases(applicantId) {
+  return request(
+    `/api/v1/applicants/${encodeURIComponent(applicantId)}/cases`,
+    { tokenContext: "applicant" }
+  );
+}
+
+export function updateCaseStatus(caseId, status) {
+  return request(`/api/v1/cases/${encodeURIComponent(caseId)}/status`, {
+    method: "PATCH",
+    body: { status },
+    tokenContext: "applicant",
+  });
+}
+
+export function getCaseAssessment(caseId) {
+  return request(`/api/v1/cases/${encodeURIComponent(caseId)}/assessment`, {
+    tokenContext: "applicant",
+  });
+}
+
+export function listCaseDocuments(caseId) {
+  return request(`/api/v1/cases/${encodeURIComponent(caseId)}/documents`, {
+    tokenContext: "applicant",
+  });
+}
+
+export function uploadCaseDocument(caseId, file, checklistItemId) {
+  return request(`/api/v1/cases/${encodeURIComponent(caseId)}/documents`, {
+    method: "POST",
+    rawBody: file,
+    rawContentType: file.type || "application/octet-stream",
+    query: {
+      filename: file.name,
+      checklist_item_id: checklistItemId,
+    },
+    tokenContext: "applicant",
+  });
+}
+
+export function downloadCaseDocument(caseId, documentId) {
+  return request(
+    `/api/v1/cases/${encodeURIComponent(caseId)}/documents/${encodeURIComponent(documentId)}`,
+    { responseType: "blob", tokenContext: "applicant" }
+  );
+}
+
+export function reviewCaseDocument(caseId, documentId, reviewStatus, rejectionReason) {
+  return request(
+    `/api/v1/cases/${encodeURIComponent(caseId)}/documents/${encodeURIComponent(documentId)}/review`,
+    {
+      method: "PATCH",
+      body: {
+        review_status: reviewStatus,
+        rejection_reason: rejectionReason,
+      },
+      tokenContext: "applicant",
+    }
+  );
+}
+
+export function listCaseChecklist(caseId) {
+  return request(`/api/v1/cases/${encodeURIComponent(caseId)}/checklist`, {
+    tokenContext: "applicant",
+  });
+}
+
+export function generateCaseChecklist(caseId, assessmentId) {
+  return request(`/api/v1/cases/${encodeURIComponent(caseId)}/checklist/generate`, {
+    method: "POST",
+    body: { assessment_id: assessmentId || undefined },
+    tokenContext: "applicant",
+  });
+}
+
+export function updateCaseChecklistItem(caseId, itemId, status, rejectionReason) {
+  return request(
+    `/api/v1/cases/${encodeURIComponent(caseId)}/checklist/${encodeURIComponent(itemId)}`,
+    {
+      method: "PATCH",
+      body: { status, rejection_reason: rejectionReason },
+      tokenContext: "applicant",
+    }
+  );
+}
+
+export function listCaseForms(caseId) {
+  return request(`/api/v1/cases/${encodeURIComponent(caseId)}/forms`, {
+    tokenContext: "applicant",
+  });
+}
+
+export function saveCaseForm(caseId, templateId, answers) {
+  return request(
+    `/api/v1/cases/${encodeURIComponent(caseId)}/forms/${encodeURIComponent(templateId)}`,
+    {
+      method: "POST",
+      body: { answers_json: answers },
+      tokenContext: "applicant",
+    }
+  );
+}
+
+export function submitCaseForm(caseId, templateId) {
+  return request(
+    `/api/v1/cases/${encodeURIComponent(caseId)}/forms/${encodeURIComponent(templateId)}/submit`,
+    { method: "POST", tokenContext: "applicant" }
+  );
+}
+
+export function confirmCaseForm(caseId, templateId) {
+  return request(
+    `/api/v1/cases/${encodeURIComponent(caseId)}/forms/${encodeURIComponent(templateId)}/confirm`,
+    { method: "POST", body: {}, tokenContext: "applicant" }
+  );
+}
+
+export function reviewCaseForm(caseId, templateId, status, reviewNotes) {
+  return request(
+    `/api/v1/cases/${encodeURIComponent(caseId)}/forms/${encodeURIComponent(templateId)}/review`,
+    {
+      method: "POST",
+      body: { status, review_notes: reviewNotes },
+      tokenContext: "applicant",
+    }
+  );
+}
+
+export function downloadCasePackage(caseId) {
+  return request(`/api/v1/cases/${encodeURIComponent(caseId)}/package`, {
+    responseType: "blob",
+    tokenContext: "applicant",
+  });
+}
+
+export function listCaseActivities(tenantId, caseId) {
+  return request(
+    `/api/v1/tenants/${encodeURIComponent(tenantId)}/cases/${encodeURIComponent(caseId)}/activities`,
+    { tokenContext: "applicant" }
+  );
+}
+
+export function listTenants() {
+  return request("/api/v1/tenants", { tokenContext: "applicant" });
+}
+
+export function createTenant(body) {
+  return request("/api/v1/tenants", {
+    method: "POST",
+    body,
+    tokenContext: "applicant",
+  });
+}
+
+export function listTenantCases(tenantId) {
+  return request(`/api/v1/tenants/${encodeURIComponent(tenantId)}/cases`, {
+    tokenContext: "applicant",
+  });
+}
+
+export function listUnassignedTenantCases(tenantId) {
+  return request(
+    `/api/v1/tenants/${encodeURIComponent(tenantId)}/unassigned-cases`,
+    { tokenContext: "applicant" }
+  );
+}
+
+export function createTenantCase(tenantId, body) {
+  return request(`/api/v1/tenants/${encodeURIComponent(tenantId)}/cases`, {
+    method: "POST",
+    body,
+    tokenContext: "applicant",
+  });
+}
+
+export function assignTenantCase(tenantId, caseId, consultantId) {
+  return request(
+    `/api/v1/tenants/${encodeURIComponent(tenantId)}/cases/${encodeURIComponent(caseId)}/assign`,
+    {
+      method: "POST",
+      body: { consultant_id: consultantId },
+      tokenContext: "applicant",
+    }
+  );
+}
+
+export function getTenantDashboard(tenantId) {
+  return request(`/api/v1/tenants/${encodeURIComponent(tenantId)}/dashboard`, {
+    tokenContext: "applicant",
+  });
+}
+
+export function listTenantApplicants(tenantId) {
+  return request(`/api/v1/tenants/${encodeURIComponent(tenantId)}/applicants`, {
+    tokenContext: "applicant",
+  });
+}
+
+export function listTenantMembers(tenantId) {
+  return request(`/api/v1/tenants/${encodeURIComponent(tenantId)}/members`, {
+    tokenContext: "applicant",
+  });
+}
+
+export function createTenantInvitation(tenantId, email, role) {
+  return request(`/api/v1/tenants/${encodeURIComponent(tenantId)}/invitations`, {
+    method: "POST",
+    body: { email, role },
+    tokenContext: "applicant",
+  });
+}
+
+export function acceptTenantInvitation(token) {
+  return request("/api/v1/tenants/invitations/accept", {
+    method: "POST",
+    body: { token },
+    tokenContext: "applicant",
+  });
+}
+
+export function listTenantFormTemplates(tenantId, programId) {
+  return request(
+    `/api/v1/tenants/${encodeURIComponent(tenantId)}/form-templates`,
+    { query: { program_id: programId }, tokenContext: "applicant" }
+  );
+}
+
+export function createTenantFormTemplate(tenantId, body) {
+  return request(`/api/v1/tenants/${encodeURIComponent(tenantId)}/form-templates`, {
+    method: "POST",
+    body,
+    tokenContext: "applicant",
+  });
+}
+
+export function listTenantInvitations(tenantId) {
+  return request(`/api/v1/tenants/${encodeURIComponent(tenantId)}/invitations`, {
+    tokenContext: "applicant",
+  });
+}
+
+export function createApplicantProfile(body) {
+  return request("/api/v1/applicants", {
+    method: "POST",
+    body,
+    tokenContext: "applicant",
+  });
+}
+
+export function updateApplicantProfile(applicantId, body) {
+  return request(`/api/v1/applicants/${encodeURIComponent(applicantId)}`, {
+    method: "PATCH",
+    body,
+    tokenContext: "applicant",
+  });
+}
+
+export function listApplicantAssessments(applicantId, limit = 20) {
+  return request("/api/v1/assessments", {
+    query: { applicant_id: applicantId, limit },
+    tokenContext: "applicant",
+  });
+}
+
+export function createApplicantAssessment(applicantId, programId) {
+  return request("/api/v1/assessments", {
+    method: "POST",
+    body: { applicant_id: applicantId, program_id: programId },
+    tokenContext: "applicant",
+  });
+}
+
+export function getApplicantAssessment(assessmentId) {
+  return request(`/api/v1/assessments/${encodeURIComponent(assessmentId)}`, {
+    tokenContext: "applicant",
+  });
+}
+
+export function answerApplicantGap(assessmentId, gapId, value) {
+  return request(
+    `/api/v1/assessments/${encodeURIComponent(assessmentId)}/gaps/${encodeURIComponent(gapId)}/answer`,
+    {
+      method: "POST",
+      body: { value },
+      tokenContext: "applicant",
+    }
+  );
 }
 
 // ---------------------------------------------------------------------------

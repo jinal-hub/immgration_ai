@@ -80,6 +80,8 @@ def upsert_sources(conn, sources: list[dict]) -> int:
             "priority": s["priority"],
             "monitoring_method": s.get("monitoring_method", "WEB"),
             "crawl_frequency": s.get("crawl_frequency", "DAILY"),
+            "extract_requirements": s.get("extract_requirements", True),
+            "content_kind": s.get("content_kind", "PAGE"),
             "notes": s.get("notes"),
             "created_at": None,
             "updated_at": None,
@@ -92,11 +94,11 @@ def upsert_sources(conn, sources: list[dict]) -> int:
             INSERT INTO government_sources
                 (source_id, country_id, program_id, visa_category, authority, url,
                  source_type, source_subtype, priority, monitoring_method, crawl_frequency,
-                 status, notes, created_at, updated_at)
+                 extract_requirements, content_kind, status, notes, created_at, updated_at)
             VALUES
                 (:source_id, :country_id, :program_id, :visa_category, :authority, :url,
                  :source_type, :source_subtype, :priority, :monitoring_method, :crawl_frequency,
-                 'ACTIVE', :notes, :created_at, :updated_at)
+                 :extract_requirements, :content_kind, 'ACTIVE', :notes, :created_at, :updated_at)
             ON CONFLICT(source_id) DO UPDATE SET
                 program_id = excluded.program_id,
                 visa_category = excluded.visa_category,
@@ -107,6 +109,8 @@ def upsert_sources(conn, sources: list[dict]) -> int:
                 priority = excluded.priority,
                 monitoring_method = excluded.monitoring_method,
                 crawl_frequency = excluded.crawl_frequency,
+                extract_requirements = excluded.extract_requirements,
+                content_kind = excluded.content_kind,
                 notes = excluded.notes;
             """
         else:
@@ -114,11 +118,11 @@ def upsert_sources(conn, sources: list[dict]) -> int:
             INSERT INTO government_sources
                 (source_id, country_id, program_id, visa_category, authority, url,
                  source_type, source_subtype, priority, monitoring_method, crawl_frequency,
-                 status, notes)
+                 extract_requirements, content_kind, status, notes)
             VALUES
                 (:source_id, :country_id, :program_id, :visa_category, :authority, :url,
                  :source_type, :source_subtype, :priority, :monitoring_method, :crawl_frequency,
-                 'ACTIVE', :notes)
+                 :extract_requirements, :content_kind, 'ACTIVE', :notes)
             ON CONFLICT(source_id) DO UPDATE SET
                 program_id = excluded.program_id,
                 visa_category = excluded.visa_category,
@@ -129,6 +133,8 @@ def upsert_sources(conn, sources: list[dict]) -> int:
                 priority = excluded.priority,
                 monitoring_method = excluded.monitoring_method,
                 crawl_frequency = excluded.crawl_frequency,
+                extract_requirements = excluded.extract_requirements,
+                content_kind = excluded.content_kind,
                 notes = excluded.notes;
             """
             row.pop("created_at")

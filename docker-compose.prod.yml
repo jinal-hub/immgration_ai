@@ -68,6 +68,13 @@ services:
       JWT_EXPIRATION_MINUTES: ${JWT_EXPIRATION_MINUTES:-1440}
       PASSWORD_MIN_LENGTH: "8"
       ALLOW_PUBLIC_REGISTRATION: "false"
+      APP_PUBLIC_URL: ${APP_PUBLIC_URL:?set APP_PUBLIC_URL in the env file}
+      SMTP_HOST: ${SMTP_HOST:-}
+      SMTP_PORT: ${SMTP_PORT:-587}
+      SMTP_USERNAME: ${SMTP_USERNAME:-}
+      SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+      SMTP_FROM: ${SMTP_FROM:-}
+      SMTP_STARTTLS: ${SMTP_STARTTLS:-true}
       CORS_ORIGINS: "https://${DOMAIN:?set DOMAIN in the env file}"
       # Only nginx on the private app network can reach the API. Trusting its
       # forwarding headers recovers the real client address for login throttling.
@@ -89,6 +96,13 @@ services:
       FETCH_PROXY_URL: ${FETCH_PROXY_URL:-}
       FETCH_USER_AGENT: ${FETCH_USER_AGENT:-}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      APPLICANT_DOCUMENT_STORAGE: s3
+      APPLICANT_DOCUMENT_S3_BUCKET: ${APPLICANT_DOCUMENT_S3_BUCKET:?set APPLICANT_DOCUMENT_S3_BUCKET}
+      APPLICANT_DOCUMENT_S3_REGION: ${APPLICANT_DOCUMENT_S3_REGION:?set APPLICANT_DOCUMENT_S3_REGION}
+      APPLICANT_DOCUMENT_S3_ENDPOINT: ${APPLICANT_DOCUMENT_S3_ENDPOINT:-}
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:?set AWS_ACCESS_KEY_ID}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:?set AWS_SECRET_ACCESS_KEY}
+      AWS_SESSION_TOKEN: ${AWS_SESSION_TOKEN:-}
     depends_on:
       postgres:
         condition: service_healthy

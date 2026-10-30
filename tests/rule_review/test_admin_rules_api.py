@@ -234,10 +234,11 @@ class TestTransactionalActivation:
 
 class TestGoldRuleReviewActions:
     @staticmethod
-    def _create_gold_draft(session, field="age"):
+    def _create_gold_draft(session, field="age", status="DRAFT"):
         return _create_rule(
             session,
             "RULE-GOLD-REAL-189-TEST",
+            status=status,
             field=field,
             source_id="SRC-AU-189-MAIN",
             document_id="DOC-GOLD-189-REAL",
@@ -284,6 +285,22 @@ class TestGoldRuleReviewActions:
         assert accepted.status_code == 200
         assert accepted.json()["status"] == "ACTIVE"
         assert accepted.json()["evaluable"] is False
+
+    @pytest.mark.parametrize("status", ["VALIDATED", "APPROVED"])
+    def test_gold_activation_completes_existing_pre_active_state(
+        self, client, engine, admin_headers, status
+    ):
+        with get_session_factory(engine)() as s:
+            self._create_gold_draft(s, status=status)
+
+        response = client.post(
+            "/api/v1/admin/rules/RULE-GOLD-REAL-189-TEST/review",
+            json={"decision": "ACTIVATE"},
+            headers=admin_headers,
+        )
+
+        assert response.status_code == 200
+        assert response.json()["status"] == "ACTIVE"
 
     def test_gold_reject_action(self, client, engine, admin_headers):
         with get_session_factory(engine)() as s:

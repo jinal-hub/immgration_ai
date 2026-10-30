@@ -14,7 +14,7 @@ from db.models import (
     Base, Country, ImmigrationProgram, GovernmentSource,
     GovernmentDocument, PipelineRun, ApiUser,
 )
-from db.repositories import PipelineRunRepo
+from db.repositories import PipelineRunRepo, SyncJobRepo
 from db.connection import get_session_factory
 from api.main import app
 
@@ -307,7 +307,7 @@ class TestPipelineRunRepo:
         repo = PipelineRunRepo(session)
         r1 = repo.create(source_id="src-001", trigger_type="MANUAL")
         r2 = repo.create(source_id="src-001", trigger_type="MANUAL")
-        r3 = repo.create(source_id="src-001", trigger_type="MANUAL")
+        repo.create(source_id="src-001", trigger_type="MANUAL")
         repo.complete(r1.run_id)
         repo.fail(r2.run_id, "error")
         counts = repo.count_by_status()
@@ -386,6 +386,92 @@ class TestPipelineRunAPI:
         assert data["errors"] == ["Connection refused"]
 
 
+class TestDurableSyncJobAPI:
+    def _make_job(self, session, status="INTERRUPTED"):
+        _seed_source(session)
+        job_id = str(uuid.uuid4())
+        repo = SyncJobRepo(session)
+        repo.create(job_id, "MANUAL", ["src-001"])
+        repo.mark_running(job_id, "src-001")
+        if status == "COMPLETED":
+            repo.mark_source(job_id, "src-001", "CHANGED")
+            repo.finish(job_id)
+        else:
+            repo.interrupt(job_id)
+        session.commit()
+        return job_id
+
+    def test_durable_job_is_readable_after_restart(self, client, db_engine, session):
+        headers = _auth_headers(client, db_engine)
+        job_id = self._make_job(session, status="COMPLETED")
+
+        resp = client.get(f"/api/v1/admin/runs/{job_id}", headers=headers)
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["run_id"] == job_id
+        assert data["status"] == "COMPLETED"
+        assert data["total_sources"] == 1
+        assert data["result"]["changed"] == 1
+        assert data["result"]["results"][0]["source_id"] == "src-001"
+
+    def test_resume_route_reuses_the_same_job_id(
+        self, client, db_engine, session, monkeypatch,
+    ):
+        headers = _auth_headers(client, db_engine)
+        job_id = self._make_job(session)
+        seen = {}
+
+        import scheduler
+
+        def _fake(engine, sync_job_id):
+            seen["engine"] = engine
+            seen["sync_job_id"] = sync_job_id
+            return {"run_id": sync_job_id, "status": "STARTED", "resumed": True}
+
+        monkeypatch.setattr(scheduler, "start_resume_sync_background", _fake)
+
+        resp = client.post(
+            f"/api/v1/admin/runs/{job_id}/resume", headers=headers,
+        )
+
+        assert resp.status_code == 202
+        assert seen["sync_job_id"] == job_id
+        assert seen["engine"] is db_engine
+
+    def test_resume_sync_alias_exists(self, client, db_engine, session, monkeypatch):
+        headers = _auth_headers(client, db_engine)
+        job_id = self._make_job(session)
+
+        import scheduler
+
+        monkeypatch.setattr(
+            scheduler, "start_resume_sync_background",
+            lambda engine, sync_job_id: {"run_id": sync_job_id, "status": "STARTED"},
+        )
+
+        resp = client.post(
+            f"/api/v1/admin/sync/{job_id}/resume", headers=headers,
+        )
+        assert resp.status_code == 202
+
+    def test_completed_job_cannot_be_resumed(self, client, db_engine, session):
+        headers = _auth_headers(client, db_engine)
+        job_id = self._make_job(session, status="COMPLETED")
+
+        resp = client.post(
+            f"/api/v1/admin/runs/{job_id}/resume", headers=headers,
+        )
+        assert resp.status_code == 409
+
+    def test_resume_unknown_job_is_404(self, client, db_engine):
+        headers = _auth_headers(client, db_engine)
+        resp = client.post(
+            f"/api/v1/admin/runs/{uuid.uuid4()}/resume", headers=headers,
+        )
+        assert resp.status_code == 404
+
+
 # ---------------------------------------------------------------------------
 # Integration: Orchestrator creates PipelineRuns
 # ---------------------------------------------------------------------------
@@ -408,7 +494,7 @@ class TestOrchestratorPipelineRunIntegration:
         """Source with a document but no last_hash → first-time detection → COMPLETED."""
         _seed_source_with_doc(session, "src-001", content_hash="new_hash_abc")
         from orchestration.government_sync import sync_source
-        result = sync_source(session, "src-001", dry_run=True, trigger_type="MANUAL")
+        sync_source(session, "src-001", dry_run=True, trigger_type="MANUAL")
         session.flush()
         runs = session.query(PipelineRun).all()
         assert len(runs) == 1
@@ -449,7 +535,7 @@ class TestOrchestratorPipelineRunIntegration:
     def test_sync_source_error_creates_failed_run(self, session):
         from orchestration.government_sync import sync_source
         # Non-existent source will raise ValueError, caught as error
-        result = sync_source(session, "nonexistent", trigger_type="MANUAL")
+        sync_source(session, "nonexistent", trigger_type="MANUAL")
         session.flush()
         runs = session.query(PipelineRun).all()
         assert len(runs) == 1
@@ -460,7 +546,7 @@ class TestOrchestratorPipelineRunIntegration:
         _seed_source(session, "src-001")
         _seed_source(session, "src-002")
         from orchestration.government_sync import sync_all_sources
-        results = sync_all_sources(session, dry_run=True, trigger_type="SCHEDULED")
+        sync_all_sources(session, dry_run=True, trigger_type="SCHEDULED")
         session.flush()
         runs = session.query(PipelineRun).all()
         assert len(runs) == 2
@@ -469,7 +555,6 @@ class TestOrchestratorPipelineRunIntegration:
     def test_scheduler_sync_job_creates_scheduled_runs(self, session):
         _seed_source(session)
         from scheduler import _sync_job
-        from db.connection import get_engine
         # Create an in-memory engine for the scheduler to use
         engine = create_engine(
             "sqlite:///:memory:",

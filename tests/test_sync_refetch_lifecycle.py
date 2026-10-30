@@ -748,11 +748,18 @@ class TestOneBrowserPerSyncRun:
             def wait_for_selector(self, selector, timeout=None):
                 pass
 
-            def content(self):
-                return html.decode("utf-8")
+            def locator(self, selector):
+                assert selector == "html"
+                return _FakeLocator()
 
             def close(self):
                 pass
+
+        class _FakeLocator:
+            def evaluate(self, expression, arg=None, timeout=None):
+                assert expression == "(root) => root.outerHTML"
+                assert timeout is not None
+                return html.decode("utf-8")
 
         class _FakeRequest:
             def get(self, url, headers=None, timeout=None, max_redirects=None):

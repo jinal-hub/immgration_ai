@@ -67,6 +67,12 @@ export function useSyncRunner(onSettled) {
         showToast(`Sync failed: ${job.error || "unknown error"}`);
         return;
       }
+      if (job.status === "INTERRUPTED") {
+        showToast(
+          "Sync was interrupted. Its progress was saved; resume it from the API or Sources page."
+        );
+        return;
+      }
       const result = job.result || {};
       let reviewCount = null;
       try {
@@ -146,7 +152,12 @@ export function useSyncRunner(onSettled) {
         }
         try {
           const job = await api.getRun(runId);
-          if (job.status === "COMPLETED" || job.status === "FAILED") {
+          if (
+            job.status === "COMPLETED" ||
+            job.status === "PARTIAL" ||
+            job.status === "FAILED" ||
+            job.status === "INTERRUPTED"
+          ) {
             stop();
             await summarize(job);
             // Small delay so the DB write for last_checked_at commits before

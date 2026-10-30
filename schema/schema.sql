@@ -1,7 +1,8 @@
 -- Phase-1 schema: Government Source Registry + Document Metadata + Versioning
 -- Scope: Australia, Skilled Migration (189 / 190 / 491) only.
 -- Visa category vocabulary reconciled with live ORM models to:
---   SKILLED / WORK / STUDENT / VISITOR (replaces legacy STUDY/WORK_PERMIT/DEPENDENT)
+--   SKILLED / WORK / STUDENT / VISITOR / FAMILY / BUSINESS /
+--   HUMANITARIAN / OTHER / GENERAL
 -- Engine: SQLite (file-backed, matches the "file-backed now, DB-backed later" plan).
 
 PRAGMA foreign_keys = ON;
@@ -22,10 +23,12 @@ CREATE TABLE IF NOT EXISTS immigration_programs (
     program_id     TEXT PRIMARY KEY,        -- 'SKILLED_189'
     country_id     TEXT NOT NULL REFERENCES countries(country_id),
     visa_category  TEXT NOT NULL CHECK (visa_category IN
-                     ('SKILLED','WORK','STUDENT','VISITOR')),
+                     ('SKILLED','WORK','STUDENT','VISITOR','FAMILY',
+                      'BUSINESS','HUMANITARIAN','OTHER','GENERAL')),
     subclass_code  TEXT,                    -- '189'
     name           TEXT NOT NULL,
-    status         TEXT NOT NULL DEFAULT 'ACTIVE' CHECK (status IN ('ACTIVE','CLOSED','SUSPENDED'))
+    status         TEXT NOT NULL DEFAULT 'ACTIVE' CHECK
+                     (status IN ('ACTIVE','CLOSED','SUSPENDED','REFERENCE_ONLY'))
 );
 
 -- ---------------------------------------------------------------------------
@@ -36,7 +39,8 @@ CREATE TABLE IF NOT EXISTS government_sources (
     country_id          TEXT NOT NULL REFERENCES countries(country_id),
     program_id          TEXT NOT NULL REFERENCES immigration_programs(program_id),
     visa_category        TEXT NOT NULL CHECK (visa_category IN
-                     ('SKILLED','WORK','STUDENT','VISITOR')),
+                     ('SKILLED','WORK','STUDENT','VISITOR','FAMILY',
+                      'BUSINESS','HUMANITARIAN','OTHER','GENERAL')),
     authority            TEXT NOT NULL,             -- 'Department of Home Affairs'
     url                  TEXT NOT NULL UNIQUE,
     source_type          TEXT NOT NULL CHECK (source_type IN ('HTML','PDF')),
@@ -46,6 +50,8 @@ CREATE TABLE IF NOT EXISTS government_sources (
     monitoring_method      TEXT NOT NULL DEFAULT 'WEB' CHECK (monitoring_method IN ('WEB','API','MANUAL','BROWSER')),
     crawl_frequency        TEXT NOT NULL DEFAULT 'DAILY' CHECK (crawl_frequency IN
                      ('HOURLY','DAILY','WEEKLY','MONTHLY')),
+    extract_requirements INTEGER NOT NULL DEFAULT 1,
+    content_kind         TEXT NOT NULL DEFAULT 'PAGE' CHECK (content_kind IN ('PAGE','NEWS_LIST')),
     last_checked_at        TEXT,                    -- ISO8601 timestamp
     last_hash              TEXT,                    -- sha256 of raw bytes at last successful fetch
     status                 TEXT NOT NULL DEFAULT 'ACTIVE' CHECK (status IN
@@ -66,7 +72,8 @@ CREATE TABLE IF NOT EXISTS government_documents (
     country_id        TEXT NOT NULL REFERENCES countries(country_id),
     program_id        TEXT NOT NULL REFERENCES immigration_programs(program_id),
     visa_category     TEXT NOT NULL CHECK (visa_category IN
-                     ('SKILLED','WORK','STUDENT','VISITOR')),
+                     ('SKILLED','WORK','STUDENT','VISITOR','FAMILY',
+                      'BUSINESS','HUMANITARIAN','OTHER','GENERAL')),
     document_type     TEXT NOT NULL,               -- 'ELIGIBILITY_GUIDANCE','POINTS_TABLE','LEGISLATION_TEXT'
     url               TEXT NOT NULL,
     title             TEXT,

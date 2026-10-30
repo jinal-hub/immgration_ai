@@ -75,6 +75,27 @@ async def lifespan(app: FastAPI):
                 logger.warning("Admin bootstrap skipped",
                                extra={"error": str(e)})
 
+    # A previous process may have been killed mid-sync. Its durable job can
+    # otherwise stay RUNNING forever; mark it INTERRUPTED so the resume endpoint
+    # is usable and the real state is visible. This is independent of whether
+    # the scheduler itself is enabled in this process.
+    if os.getenv("TESTING") != "true" and getattr(app.state, "db_engine", None):
+        try:
+            from db.connection import get_session
+            from db.repositories import SyncJobRepo
+
+            with get_session(app.state.db_engine) as session:
+                recovered = SyncJobRepo(session).recover_orphans()
+                session.commit()
+            if recovered:
+                logger.warning(
+                    "Recovered orphaned sync jobs", extra={"count": recovered},
+                )
+        except Exception as e:
+            logger.warning(
+                "Could not recover orphaned sync jobs", extra={"error": str(e)},
+            )
+
     # Start scheduler if ENABLE_SCHEDULER=true (skip in TESTING mode). A
     # persisted SchedulerSettings row (set via PUT /admin/scheduler) overrides
     # the GOVERNMENT_SYNC_*_UTC / GOVERNMENT_SYNC_INTERVAL_MINUTES env defaults.
@@ -215,13 +236,15 @@ if os.getenv("ENVIRONMENT", "development").strip().lower() == "production":
 # ---------------------------------------------------------------------------
 # Routes
 # ---------------------------------------------------------------------------
-from api.routes import applicants, assessments, auth, health, admin_rules, pipeline_runs, admin_sources, admin_requirements, admin_documents, admin_scheduler, admin_applicants, search  # noqa: E402
+from api.routes import applicants, assessments, auth, cases, health, tenants, admin_rules, pipeline_runs, admin_sources, admin_requirements, admin_documents, admin_scheduler, admin_applicants, search  # noqa: E402
 from api.routes.auth import require_admin  # noqa: E402
 
 app.include_router(health.router)
 app.include_router(auth.router, prefix="/api/v1/auth", tags=["auth"])
 app.include_router(applicants.router, prefix="/api/v1/applicants", tags=["applicants"])
 app.include_router(assessments.router, prefix="/api/v1/assessments", tags=["assessments"])
+app.include_router(tenants.router, prefix="/api/v1/tenants", tags=["tenants"])
+app.include_router(cases.router, prefix="/api/v1/cases", tags=["application-cases"])
 app.include_router(search.router, prefix="/api/v1/search", tags=["search"])
 app.include_router(admin_rules.router, prefix="/api/v1/admin/rules", tags=["admin-rules"])
 app.include_router(admin_sources.router, prefix="/api/v1/admin/sources", tags=["admin-sources"])
@@ -251,6 +274,16 @@ def trigger_sync(request: Request, current_user: dict = Depends(require_admin)):
             status_code=409, detail=result.get("detail", "A sync is already in progress")
         )
     return result
+
+
+@app.post("/api/v1/admin/sync/{run_id}/resume", tags=["admin-sync"], status_code=202)
+def resume_sync(
+    run_id: str,
+    request: Request,
+    current_user: dict = Depends(require_admin),
+):
+    """Alias for POST /api/v1/admin/runs/{run_id}/resume."""
+    return pipeline_runs.resume_run(run_id, request, current_user)
 
 
 def create_app() -> FastAPI:

@@ -41,6 +41,7 @@ services:
       # against the actual file on disk and discovering only files written by
       # the single still-running container since its last start survived.
       - raw_snapshots:/app/raw
+      - applicant_documents:/app/applicant_documents
     environment:
       DATABASE_URL: postgresql+psycopg2://immigration:immigration_dev@postgres:5432/immigration
       JWT_SECRET_KEY: ${JWT_SECRET_KEY:-change-me-in-production}
@@ -52,13 +53,34 @@ services:
       CORS_ORIGINS: http://localhost:3000,http://localhost:5173
       ENABLE_SCHEDULER: "true"
       GOVERNMENT_SYNC_HOUR_UTC: "3"
+      FETCH_BACKEND: ${FETCH_BACKEND:-playwright}
+      FETCH_MIN_INTERVAL_SECONDS: ${FETCH_MIN_INTERVAL_SECONDS:-8}
+      FETCH_JITTER_SECONDS: ${FETCH_JITTER_SECONDS:-4}
       FETCH_COOLDOWN_HOURS: ${FETCH_COOLDOWN_HOURS:-0.25}
+      FETCH_ALLOWED_DOMAINS: ${FETCH_ALLOWED_DOMAINS:-.gov.au,.abc.net.au}
       COHERE_API_KEY: ${COHERE_API_KEY:-}
       EXTRACTION_MODEL: ${EXTRACTION_MODEL:-command-a-03-2025}
       EMBEDDINGS_ENABLED: ${EMBEDDINGS_ENABLED:-false}
       EMBEDDING_MODEL: ${EMBEDDING_MODEL:-embed-v4.0}
       # Off unless the operator explicitly opts in, matching the code default.
-      ALLOW_PUBLIC_REGISTRATION: ${ALLOW_PUBLIC_REGISTRATION:-false}
+      # Applicant self-registration is available in local development.
+      # Production compose keeps this disabled unless explicitly changed there.
+      ALLOW_PUBLIC_REGISTRATION: ${ALLOW_PUBLIC_REGISTRATION:-true}
+      APP_PUBLIC_URL: ${APP_PUBLIC_URL:-http://localhost:5173}
+      SMTP_HOST: ${SMTP_HOST:-}
+      SMTP_PORT: ${SMTP_PORT:-587}
+      SMTP_USERNAME: ${SMTP_USERNAME:-}
+      SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+      SMTP_FROM: ${SMTP_FROM:-}
+      SMTP_STARTTLS: ${SMTP_STARTTLS:-true}
+      APPLICANT_DOCUMENT_STORAGE: ${APPLICANT_DOCUMENT_STORAGE:-local}
+      APPLICANT_DOCUMENT_DIR: ${APPLICANT_DOCUMENT_DIR:-/app/applicant_documents}
+      APPLICANT_DOCUMENT_S3_BUCKET: ${APPLICANT_DOCUMENT_S3_BUCKET:-}
+      APPLICANT_DOCUMENT_S3_REGION: ${APPLICANT_DOCUMENT_S3_REGION:-}
+      APPLICANT_DOCUMENT_S3_ENDPOINT: ${APPLICANT_DOCUMENT_S3_ENDPOINT:-}
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-}
+      AWS_SESSION_TOKEN: ${AWS_SESSION_TOKEN:-}
     depends_on:
       postgres:
         condition: service_healthy
@@ -69,3 +91,4 @@ services:
 volumes:
   pgdata:
   raw_snapshots:
+  applicant_documents:

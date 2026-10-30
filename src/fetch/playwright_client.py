@@ -441,14 +441,15 @@ def _fetch_page(
     """
     if etag or last_modified:
         try:
-            # HEAD asks the same question as a conditional GET without a second
-            # body transfer. Servers that do not implement HEAD answer 405/501;
-            # that is a failed pre-check, so we render normally rather than
-            # treating it as a block. A real 401/403/429 is authoritative and
-            # stops here: navigating again would be a second request to an
-            # origin that has just refused us.
+            # Use a real conditional GET, not HEAD. Several government hosts
+            # reject HEAD (or answer it differently from GET) with 403/405, and
+            # treating that probe response as authoritative falsely marked
+            # perfectly fetchable pages as blocked. A conditional GET asks the
+            # exact question the validators are designed for. A real
+            # 401/403/429 is still authoritative and stops here: navigating
+            # again would be a second request to an origin that just refused us.
             probe = _guarded_request(
-                context, "head", url,
+                context, "get", url,
                 _conditional_headers(etag, last_modified), timeout_ms, limiter,
             )
             probe_headers = dict(probe.headers or {})
@@ -521,7 +522,9 @@ def _fetch_page(
                 selector_timed_out = True
             selector_wait_ms = int((time.monotonic() - selector_started) * 1000)
 
-        body_text = page.content()
+        body_text = page.locator("html").evaluate(
+            "(root) => root.outerHTML", timeout=timeout_ms,
+        )
         body = body_text.encode("utf-8")
     finally:
         try:
